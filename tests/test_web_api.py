@@ -55,7 +55,7 @@ class WebApiTests(unittest.TestCase):
     def test_web_app_and_full_business_workflow(self):
         status, html = self.request("/")
         self.assertEqual(status, 200)
-        self.assertIn(b"Tp | Operaciones comerciales", html)
+        self.assertIn(b"Faro | Operaciones comerciales", html)
 
         status, bootstrap = self.request("/api/bootstrap")
         self.assertEqual(status, 200)

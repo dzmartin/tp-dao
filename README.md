@@ -51,6 +51,20 @@ Las ventas validan el stock disponible y exigen que los cobros coincidan con el 
 
 ## Pruebas
 
+Instala las dependencias de desarrollo en el entorno virtual activo:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+```
+
+Ejecuta las pruebas con pytest:
+
+```powershell
+python -m pytest -q
+```
+
+También puedes ejecutar las pruebas con la biblioteca estándar:
+
 ```powershell
 python -m unittest discover -v
 ```
