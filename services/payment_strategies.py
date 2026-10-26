@@ -30,8 +30,11 @@ class CardPayment(PositiveAmountPayment):
 class TransferPayment(PositiveAmountPayment):
     method = "transferencia"
 
+class CurrentAccountPayment(PositiveAmountPayment):
+    method = "cuenta corriente"
+
 
 PAYMENT_STRATEGIES: dict[str, PaymentStrategy] = {
     strategy.method: strategy()
-    for strategy in (CashPayment, CardPayment, TransferPayment)
+    for strategy in (CashPayment, CardPayment, TransferPayment, CurrentAccountPayment)
 }

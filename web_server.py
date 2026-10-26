@@ -1,6 +1,7 @@
 import json
 import sqlite3
-from datetime import date
+from http.cookies import CookieError, SimpleCookie
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -13,18 +14,212 @@ ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT / "ui" / "web"
 
 
+def _pdf_text(value: object) -> str:
+    encoded = str(value).encode("cp1252", errors="replace")
+    return "".join(
+        f"\\{byte:03o}" if byte < 32 or byte > 126 or byte in (40, 41, 92) else chr(byte)
+        for byte in encoded
+    )
+
+
+def _pdf_money(cents: int) -> str:
+    whole, fraction = divmod(cents, 100)
+    return f"$ {whole:,}".replace(",", ".") + f",{fraction:02d}"
+
+
+def _receipt_pdf(sale: dict, lines: list[dict], payments: list[dict]) -> bytes:
+    pages: list[bytes] = []
+    commands: list[str] = []
+    y = 0
+    page_bottom = 64
+
+    def text(
+        value: object, x: int = 48, baseline: int | None = None, size: int = 10, bold: bool = False
+    ) -> None:
+        baseline = y if baseline is None else baseline
+        font = "F2" if bold else "F1"
+        commands.append(f"BT /{font} {size} Tf {x} {baseline} Td ({_pdf_text(value)}) Tj ET")
+
+    def right_text(value: object, right: int, baseline: int, size: int = 10, bold: bool = False) -> None:
+        rendered = str(value)
+        text(rendered, right - int(len(rendered) * size * 0.52), baseline, size, bold)
+
+    def draw_line(x1: int, y1: int, x2: int, y2: int, color: str = "0.82 0.85 0.82") -> None:
+        commands.append(f"{color} RG {x1} {y1} m {x2} {y2} l S 0 0 0 RG")
+
+    def table_heading() -> None:
+        nonlocal y
+        y -= 8
+        commands.append(f"0.93 0.94 0.95 rg 48 {y - 18} 499 26 re f 0 0 0 rg")
+        baseline = y - 1
+        text("Producto", 55, baseline, 10, True)
+        right_text("Cant.", 365, baseline, 10, True)
+        right_text("Precio", 455, baseline, 10, True)
+        right_text("Importe", 540, baseline, 10, True)
+        y -= 31
+
+    def new_page(include_table_heading: bool = True, include_customer: bool = True) -> None:
+        nonlocal commands, y
+        if commands:
+            pages.append("\n".join(commands).encode("ascii"))
+        commands = []
+        y = 794
+        text("FARO | OPERACIONES COMERCIALES", size=11, bold=True)
+        text(f"Sucursal {sale['location_name']} · {sale['location_code']}", baseline=y - 18, size=9)
+        y -= 48
+        text("COMPROBANTE DE VENTA", size=8, bold=True)
+        y -= 26
+        text("Comprobante de venta", size=19, bold=True)
+        right_text(f"Nº {sale['receipt']}", 547, y, 12, True)
+        y -= 28
+        sold_at = datetime.fromisoformat(sale["sold_at"]).astimezone().strftime("%d/%m/%Y %H:%M")
+        text(f"Fecha: {sold_at}", size=10)
+        y -= 18
+        text(f"Estado: {sale['state']}", size=9)
+        if include_customer and sale.get("customer_name"):
+            text(f"Cliente: {sale['customer_name']}", baseline=y - 14, size=9)
+            y -= 14
+        if include_customer and sale.get("price_list_name"):
+            text(f"Lista de precios: {sale['price_list_name']}", baseline=y - 14, size=9)
+            y -= 14
+        y -= 11
+        if include_table_heading:
+            table_heading()
+
+    def wrap(value: str, max_chars: int) -> list[str]:
+        words = value.split()
+        wrapped = []
+        current = ""
+        for word in words:
+            while len(word) > max_chars:
+                if current:
+                    wrapped.append(current)
+                    current = ""
+                wrapped.append(word[:max_chars])
+                word = word[max_chars:]
+            if current and len(current) + len(word) + 1 > max_chars:
+                wrapped.append(current)
+                current = word
+            else:
+                current = f"{current} {word}".strip()
+        if current:
+            wrapped.append(current)
+        return wrapped or [""]
+
+    new_page()
+    discount_total = sum(line["discount_cents"] for line in lines)
+    subtotal = sale["total_cents"] + discount_total
+    for line in lines:
+        description = wrap(f"{line['name']} · {line['sku']}", 48)
+        row_height = max(24, 13 * len(description))
+        if y - row_height < page_bottom:
+            new_page()
+        baseline = y - 11
+        text(description[0], 55, baseline, 10, True)
+        right_text(line["quantity"], 365, baseline, 10)
+        right_text(_pdf_money(line["unit_price_cents"]), 455, baseline, 10)
+        right_text(_pdf_money(line["quantity"] * line["unit_price_cents"]), 540, baseline, 10)
+        offset = 13
+        for part in description[1:]:
+            text(part, 55, baseline - offset, 8)
+            offset += 12
+        y -= row_height
+        draw_line(48, y, 547, y)
+        y -= 4
+
+    totals_height = 78 + 13 * len(payments) + sum(13 * len(wrap(
+        f"Descuento aplicado: {_pdf_money(line['discount_cents'])}"
+        + (f" · {line['promotion_name']}" if line.get("promotion_name") else ""),
+        48,
+    )) for line in lines if line["discount_cents"])
+    if y - totals_height < page_bottom:
+        new_page(include_table_heading=False, include_customer=False)
+    for line in lines:
+        if not line["discount_cents"]:
+            continue
+        description = f"Descuento aplicado: {_pdf_money(line['discount_cents'])}"
+        if line.get("promotion_name"):
+            description += f" ({line['promotion_name']})"
+        for part in wrap(description, 76):
+            text(part, 55, y, 8)
+            y -= 12
+    y -= 5
+    right_text(f"Subtotal  {_pdf_money(subtotal)}", 540, y, 10)
+    y -= 19
+    if discount_total:
+        right_text(f"Descuentos aplicados  -{_pdf_money(discount_total)}", 540, y, 10)
+        y -= 23
+    right_text(f"TOTAL  {_pdf_money(sale['total_cents'])}", 540, y, 15, True)
+    y -= 28
+    text("Pagado con", 55, y, 9, True)
+    y -= 15
+    for payment in payments:
+        text(f"{payment['method'].capitalize()}", 55, y, 9)
+        right_text(_pdf_money(payment["amount_cents"]), 540, y, 9)
+        y -= 14
+    text("Gracias por su compra", 55, y - 4, 9)
+
+    if commands:
+        pages.append("\n".join(commands).encode("ascii"))
+
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
+    ]
+    page_ids = []
+    for page_content in pages:
+        page_id = len(objects) + 1
+        content_id = page_id + 1
+        page_ids.append(page_id)
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_id} 0 R >>".encode("ascii")
+        )
+        objects.append(
+            b"<< /Length " + str(len(page_content)).encode("ascii") + b" >>\nstream\n"
+            + page_content + b"\nendstream"
+        )
+    objects[1] = (
+        f"<< /Type /Pages /Kids [{' '.join(f'{page_id} 0 R' for page_id in page_ids)}] "
+        f"/Count {len(page_ids)} >>"
+    ).encode("ascii")
+
+    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for object_id, content in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{object_id} 0 obj\n".encode("ascii"))
+        pdf.extend(content)
+        pdf.extend(b"\nendobj\n")
+    xref_offset = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+    )
+    return bytes(pdf)
+
+
 class RetailWebHandler(BaseHTTPRequestHandler):
     application = None
+    session_cookie = "faro_session"
 
     def log_message(self, format: str, *args) -> None:
         print(f"{self.log_date_time_string()} {format % args}")
 
-    def _send(self, status: int, payload: bytes, content_type: str) -> None:
+    def _send(self, status: int, payload: bytes, content_type: str, headers: dict[str, str] | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -36,7 +231,10 @@ class RetailWebHandler(BaseHTTPRequestHandler):
         size = int(self.headers.get("Content-Length", "0"))
         if size > 1_000_000:
             raise ValueError("La solicitud excede el tamaño permitido.")
-        return json.loads(self.rfile.read(size) or b"{}")
+        payload = json.loads(self.rfile.read(size) or b"{}")
+        if not isinstance(payload, dict):
+            raise ValueError("El cuerpo de la solicitud debe ser un objeto JSON.")
+        return payload
 
     def _all(self, sql: str, parameters: tuple = ()) -> list[dict]:
         return [dict(row) for row in self.application.repository.all(sql, parameters)]
@@ -45,11 +243,119 @@ class RetailWebHandler(BaseHTTPRequestHandler):
         row = self.application.repository.one(sql, parameters)
         return dict(row) if row else {}
 
-    def _bootstrap(self) -> dict:
+    def _session_token(self) -> str | None:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except CookieError:
+            return None
+        morsel = cookie.get(self.session_cookie)
+        return morsel.value if morsel else None
+
+    def _current_user(self) -> dict | None:
+        return self.application.auth.session_user(self._session_token())
+
+    def _deny(self, status: int, message: str) -> None:
+        self._json(status, {"error": message})
+
+    def _require_role(self, user: dict, *roles: str) -> bool:
+        if user["role"] in roles:
+            return True
+        self._deny(403, "Tu perfil no tiene permiso para realizar esta operación.")
+        return False
+
+    def _authorize_post(self, path: str, body: dict, user: dict) -> bool:
+        role = user["role"]
+        if role == "CD":
+            if path in ("/api/sales", "/api/returns", "/api/orders"):
+                return self._require_role(user, "LOCAL")
+            if path == "/api/inventory-counts" or path.startswith("/api/inventory-counts/"):
+                return True
+            if path.startswith("/api/packages/"):
+                action = path.rsplit("/", 1)[-1]
+                if action in ("receive", "verify"):
+                    return self._require_role(user, "LOCAL")
+            return True
+
+        local_code = user["location_code"]
+        if path in ("/api/orders", "/api/replenishment-batches"):
+            if path == "/api/orders":
+                destinations = [body.get("destination_code")]
+            else:
+                batch = body.get("destinations")
+                destinations = (
+                    [item.get("destination_code") for item in batch if isinstance(item, dict)]
+                    if isinstance(batch, list)
+                    else []
+                )
+            if (
+                not destinations
+                or path == "/api/replenishment-batches"
+                and len(destinations) != len(body.get("destinations", []))
+                or any(code != local_code for code in destinations)
+            ):
+                self._deny(403, "Solo podés solicitar reposición para tu sucursal.")
+                return False
+            return True
+        if path in ("/api/sales", "/api/inventory-counts"):
+            if path == "/api/sales" and body.get("location_code") != local_code:
+                self._deny(403, "Solo podés operar ventas en tu sucursal.")
+                return False
+            if path == "/api/inventory-counts" and body.get("location_code") != local_code:
+                self._deny(403, "Solo podés inventariar tu sucursal.")
+                return False
+            return True
+        if path.startswith("/api/inventory-counts/"):
+            count_id = path.removeprefix("/api/inventory-counts/").rsplit("/", 1)[0]
+            location = self._one(
+                """SELECT l.code FROM inventory_counts c JOIN locations l ON l.id=c.location_id
+                   WHERE c.id=?""",
+                (count_id,),
+            )
+            if location.get("code") != local_code:
+                self._deny(403, "Solo podés operar inventarios de tu sucursal.")
+                return False
+            return True
+        if path.startswith("/api/packages/"):
+            package_code, action = path.removeprefix("/api/packages/").rsplit("/", 1)
+            if action not in ("receive", "verify"):
+                return self._require_role(user, "CD")
+            package = self._one(
+                """SELECT dst.code FROM packages p
+                   JOIN replenishment_orders o ON o.id=p.order_id
+                   JOIN locations dst ON dst.id=o.destination_id WHERE p.code=?""",
+                (package_code,),
+            )
+            if not package:
+                self._deny(404, "No existe ese bulto.")
+                return False
+            if package["code"] != local_code:
+                self._deny(403, "Solo podés recibir bultos destinados a tu sucursal.")
+                return False
+            return True
+        if path == "/api/returns":
+            sale = self._one(
+                """SELECT l.code FROM sales s JOIN locations l ON l.id=s.location_id
+                   WHERE s.receipt=?""",
+                (body.get("receipt"),),
+            )
+            if not sale:
+                self._deny(404, "No existe una venta con ese comprobante.")
+                return False
+            if sale["code"] != local_code:
+                self._deny(403, "Solo podés gestionar devoluciones de tu sucursal.")
+                return False
+            return True
+        if path == "/api/auth/logout":
+            return True
+        self._deny(403, "Tu perfil Local no tiene permiso para realizar esta operación.")
+        return False
+
+    def _bootstrap(self, user: dict | None = None) -> dict:
         repository = self.application.repository
         locations = self._all("SELECT id,code,name,type FROM locations ORDER BY type DESC,code")
         products = self._all(
-            """SELECT p.id,p.sku,p.name,p.category,p.cost_cents,p.price_cents,p.minimum_stock,
+            """SELECT p.id,p.sku,p.name,p.category,p.category_id,p.cost_cents,p.price_cents,p.minimum_stock,p.tracking_mode,
                       p.supplier_id,s.name AS supplier_name
                FROM products p LEFT JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.name"""
         )
@@ -61,9 +367,11 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                ORDER BY l.code,p.name"""
         )
         orders = self._all(
-            """SELECT o.id,o.code,o.status,o.created_at,src.code AS origin_code,dst.code AS destination_code
+            """SELECT o.id,o.code,o.status,o.created_at,src.code AS origin_code,dst.code AS destination_code,
+                      b.id AS batch_id,b.code AS batch_code
                FROM replenishment_orders o JOIN locations src ON src.id=o.origin_id
-               JOIN locations dst ON dst.id=o.destination_id ORDER BY o.id DESC"""
+               JOIN locations dst ON dst.id=o.destination_id
+               LEFT JOIN replenishment_batches b ON b.id=o.batch_id ORDER BY o.id DESC"""
         )
         for order in orders:
             order["lines"] = self._all(
@@ -88,16 +396,25 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                 (package["id"],),
             )
         sales = self._all(
-            """SELECT s.id,s.receipt,s.sold_at,s.total_cents,l.code AS location_code,
+            """SELECT s.id,s.receipt,s.sold_at,s.total_cents,s.state,s.customer_id,s.price_list_id,
+                      c.name AS customer_name,pl.name AS price_list_name,l.code AS location_code,l.name AS location_name,
                       GROUP_CONCAT(p.method, ', ') AS payment_methods
                FROM sales s JOIN locations l ON l.id=s.location_id
+               LEFT JOIN customers c ON c.id=s.customer_id
+               LEFT JOIN price_lists pl ON pl.id=s.price_list_id
                LEFT JOIN payments p ON p.sale_id=s.id
                GROUP BY s.id ORDER BY s.id DESC LIMIT 30"""
         )
         for sale in sales:
             sale["lines"] = self._all(
-                """SELECT p.sku,p.name,sl.quantity,sl.returned_quantity,sl.unit_price_cents
-                   FROM sale_lines sl JOIN products p ON p.id=sl.product_id WHERE sl.sale_id=?""",
+                """SELECT p.sku,p.name,sl.quantity,sl.returned_quantity,sl.unit_price_cents,
+                          sl.discount_cents,pr.name AS promotion_name
+                   FROM sale_lines sl JOIN products p ON p.id=sl.product_id
+                   LEFT JOIN promotions pr ON pr.id=sl.promotion_id WHERE sl.sale_id=?""",
+                (sale["id"],),
+            )
+            sale["payments"] = self._all(
+                "SELECT method,amount_cents FROM payments WHERE sale_id=? ORDER BY id",
                 (sale["id"],),
             )
         today = date.today().isoformat()
@@ -109,14 +426,49 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                WHERE COALESCE(s.quantity,0)<=p.minimum_stock"""
         ).get("count", 0)
         sales_report = self.application.reports.sales_by_period(today, today)
-        return {
+        result = {
             "locations": locations,
             "suppliers": self._all("SELECT id,tax_id,name,phone,email FROM suppliers ORDER BY name"),
+            "categories": self._all("SELECT id,name FROM categories ORDER BY name"),
             "products": products,
             "stock": stock,
+            "lots": self._all(
+                """SELECT l.code AS location_code,p.sku,bt.code,bt.expiry_date,bt.quantity
+                   FROM lots bt JOIN locations l ON l.id=bt.location_id
+                   JOIN products p ON p.id=bt.product_id ORDER BY bt.expiry_date,bt.code"""
+            ),
+            "serials": self._all(
+                """SELECT l.code AS location_code,p.sku,sn.serial,sn.status,lot.code AS lot_code
+                   FROM serial_numbers sn JOIN locations l ON l.id=sn.location_id
+                   JOIN products p ON p.id=sn.product_id LEFT JOIN lots lot ON lot.id=sn.lot_id
+                   ORDER BY sn.serial"""
+            ),
             "orders": orders,
             "packages": packages,
             "sales": sales,
+            "purchase_suggestions": self.application.retail.suggested_purchases(),
+            "purchase_orders": self._all(
+                """SELECT po.id,po.code,po.status,po.created_at,s.name AS supplier_name
+                   FROM purchase_orders po JOIN suppliers s ON s.id=po.supplier_id ORDER BY po.id DESC"""
+            ),
+            "price_lists": self._all("SELECT id,name FROM price_lists WHERE active=1 ORDER BY name"),
+            "price_list_items": self._all(
+                """SELECT pli.price_list_id,p.sku,pli.price_cents FROM price_list_items pli
+                   JOIN products p ON p.id=pli.product_id"""
+            ),
+            "promotions": self._all(
+                """SELECT pr.id,pr.name,pr.kind,pr.value,pr.starts_at,pr.ends_at,p.sku,pr.category
+                   FROM promotions pr LEFT JOIN products p ON p.id=pr.product_id
+                   WHERE pr.active=1 ORDER BY pr.ends_at"""
+            ),
+            "customers": self._all(
+                """SELECT id,code,name,phone,email,credit_limit_cents,balance_cents,loyalty_points
+                   FROM customers ORDER BY name"""
+            ),
+            "inventory_counts": self._all(
+                """SELECT ic.id,ic.code,ic.status,ic.created_at,l.code AS location_code
+                   FROM inventory_counts ic JOIN locations l ON l.id=ic.location_id ORDER BY ic.id DESC"""
+            ),
             "summary": {
                 "local_count": local_count,
                 "product_count": product_count,
@@ -125,24 +477,142 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                 "today_net_cents": sum(row["net_cents"] for row in sales_report),
             },
         }
+        for order in result["purchase_orders"]:
+            order["lines"] = self._all(
+                """SELECT p.sku,p.name,p.tracking_mode,pol.quantity,pol.received_quantity
+                   FROM purchase_order_lines pol JOIN products p ON p.id=pol.product_id
+                   WHERE pol.order_id=? ORDER BY p.sku""",
+                (order["id"],),
+            )
+        for count in result["inventory_counts"]:
+            count["lines"] = self._all(
+                """SELECT p.sku,p.name,p.tracking_mode,cl.expected_quantity,cl.counted_quantity
+                   FROM inventory_count_lines cl JOIN products p ON p.id=cl.product_id
+                   WHERE cl.count_id=? ORDER BY p.sku""",
+                (count["id"],),
+            )
+        if user:
+            result["user"] = {
+                key: user[key]
+                for key in ("id", "username", "role", "location_id", "location_code", "location_name")
+            }
+            if user["role"] == "CD":
+                result["users"] = self.application.auth.list_users()
+            else:
+                location_code = user["location_code"]
+                result["locations"] = [
+                    location for location in locations
+                    if location["code"] == location_code or location["type"] == "CD"
+                ]
+                result["stock"] = [
+                    item for item in result["stock"] if item["location_code"] == location_code
+                ]
+                result["lots"] = [
+                    item for item in result["lots"] if item["location_code"] == location_code
+                ]
+                result["serials"] = [
+                    item for item in result["serials"] if item["location_code"] == location_code
+                ]
+                result["orders"] = [
+                    item for item in orders if item["destination_code"] == location_code
+                ]
+                result["packages"] = [
+                    item for item in packages if item["destination_code"] == location_code
+                ]
+                result["sales"] = [
+                    item for item in sales if item["location_code"] == location_code
+                ]
+                result["inventory_counts"] = [
+                    item for item in result["inventory_counts"] if item["location_code"] == location_code
+                ]
+                result["purchase_suggestions"] = []
+                result["purchase_orders"] = []
+                result["suppliers"] = []
+                result["customers"] = [
+                    {"id": item["id"], "code": item["code"], "name": item["name"]}
+                    for item in result["customers"]
+                ]
+                result["summary"]["local_count"] = 1
+                result["summary"]["low_stock_count"] = sum(
+                    1 for item in result["stock"] if item["quantity"] <= item["minimum_stock"]
+                )
+                result["summary"]["in_transit_count"] = sum(
+                    1 for item in result["packages"] if item["status"] == "En tránsito"
+                )
+                result["summary"]["today_net_cents"] = sum(
+                    row["net_cents"]
+                    for row in self.application.reports.sales_by_period(
+                        today, today, location_code
+                    )
+                )
+        return result
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/auth/status":
+            self._json(200, self.application.auth.setup_status())
+            return
+        user = self._current_user() if parsed.path.startswith("/api/") else None
+        if parsed.path.startswith("/api/") and parsed.path != "/api/auth/status" and not user:
+            self._deny(401, "Iniciá sesión para continuar.")
+            return
+        if parsed.path == "/api/auth/me":
+            self._json(200, {"user": user})
+            return
+        if parsed.path.startswith("/api/sales/") and parsed.path.endswith("/receipt.pdf"):
+            receipt = unquote(parsed.path[len("/api/sales/") : -len("/receipt.pdf")])
+            sale = self._one(
+                """SELECT s.id,s.receipt,s.sold_at,s.total_cents,s.state,l.code AS location_code,l.name AS location_name,
+                          c.name AS customer_name,pl.name AS price_list_name
+                   FROM sales s JOIN locations l ON l.id=s.location_id
+                   LEFT JOIN customers c ON c.id=s.customer_id
+                   LEFT JOIN price_lists pl ON pl.id=s.price_list_id WHERE s.receipt=?""",
+                (receipt,),
+            )
+            if not sale:
+                self._json(404, {"error": "No existe una venta con ese comprobante."})
+                return
+            if user["role"] == "LOCAL" and sale["location_code"] != user["location_code"]:
+                self._deny(403, "Solo podés consultar comprobantes de tu sucursal.")
+                return
+            lines = self._all(
+                """SELECT p.sku,p.name,p.category,sl.quantity,sl.returned_quantity,sl.unit_price_cents,
+                          sl.discount_cents,pr.name AS promotion_name
+                   FROM sale_lines sl JOIN products p ON p.id=sl.product_id
+                   LEFT JOIN promotions pr ON pr.id=sl.promotion_id
+                   WHERE sl.sale_id=? ORDER BY sl.id""",
+                (sale["id"],),
+            )
+            payments = self._all(
+                "SELECT method,amount_cents FROM payments WHERE sale_id=? ORDER BY id",
+                (sale["id"],),
+            )
+            filename = f"comprobante-{sale['receipt']}.pdf"
+            self._send(
+                200,
+                _receipt_pdf(sale, lines, payments),
+                "application/pdf",
+                {"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+            return
         if parsed.path == "/api/bootstrap":
-            self._json(200, self._bootstrap())
+            self._json(200, self._bootstrap(user))
             return
         if parsed.path == "/api/reports":
             query = parse_qs(parsed.query)
             start = query.get("start", [date.today().replace(day=1).isoformat()])[0]
             end = query.get("end", [date.today().isoformat()])[0]
+            location = query.get("location", [""])[0] or None
+            if user["role"] == "LOCAL":
+                location = user["location_code"]
             self._json(
                 200,
                 {
-                    "sales": self.application.reports.sales_by_period(start, end),
-                    "best_sellers": self.application.reports.best_sellers_and_margin(start, end),
-                    "inventory": self.application.reports.inventory_and_minimums(),
-                    "logistics": self.application.reports.logistics_performance(),
-                    "movements": self.application.reports.inventory_movements(start, end),
+                    "sales": self.application.reports.sales_by_period(start, end, location),
+                    "best_sellers": self.application.reports.best_sellers_and_margin(start, end, location),
+                    "inventory": self.application.reports.inventory_and_minimums(location),
+                    "logistics": self.application.reports.logistics_performance(start, end, location),
+                    "movements": self.application.reports.inventory_movements(start, end, location),
                 },
             )
             return
@@ -161,18 +631,231 @@ class RetailWebHandler(BaseHTTPRequestHandler):
         try:
             body = self._body()
             path = unquote(urlparse(self.path).path)
+            if path == "/api/auth/setup":
+                payload = body
+                if "role" in payload:
+                    self.application.auth.initialize_profile(
+                        str(payload.get("username", "")),
+                        str(payload.get("password", "")),
+                        str(payload.get("role", "")),
+                        int(payload["location_id"]) if payload.get("location_id") else None,
+                        payload.get("create_location"),
+                    )
+                    self._json(201, {"result": "Configuración inicial completada."})
+                    return
+                self.application.auth.initialize(
+                    payload.get("cd_username", ""),
+                    payload.get("cd_password", ""),
+                    payload.get("local_username", ""),
+                    payload.get("local_password", ""),
+                    int(payload["local_location_id"]) if payload.get("local_location_id") else None,
+                    payload.get("create_cd_location"),
+                    payload.get("create_local_location"),
+                )
+                self._json(201, {"result": "Configuración inicial completada."})
+                return
+            if path == "/api/auth/login":
+                if self.application.auth.setup_status()["setup_required"]:
+                    self._deny(409, "Completá la configuración inicial antes de iniciar sesión.")
+                    return
+                user = self.application.auth.authenticate(
+                    str(body.get("username", "")), str(body.get("password", ""))
+                )
+                if not user:
+                    self._deny(401, "Usuario o contraseña incorrectos.")
+                    return
+                token, expires_at = self.application.auth.create_session(user["id"])
+                max_age = int((expires_at - datetime.now(expires_at.tzinfo)).total_seconds())
+                self._send(
+                    200,
+                    json.dumps({"user": user}, ensure_ascii=False).encode("utf-8"),
+                    "application/json; charset=utf-8",
+                    {"Set-Cookie": f"{self.session_cookie}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"},
+                )
+                return
+            if path == "/api/auth/register":
+                user_id = self.application.auth.register_user(
+                    str(body.get("username", "")),
+                    str(body.get("password", "")),
+                    str(body.get("role", "")),
+                    int(body["location_id"]) if body.get("location_id") else None,
+                )
+                user = self.application.auth.authenticate(
+                    str(body.get("username", "")), str(body.get("password", ""))
+                )
+                if not user:
+                    raise BusinessRuleError("La cuenta se creó, pero no se pudo iniciar sesión.")
+                token, expires_at = self.application.auth.create_session(user_id)
+                max_age = int((expires_at - datetime.now(expires_at.tzinfo)).total_seconds())
+                self._send(
+                    201,
+                    json.dumps({"user": user}, ensure_ascii=False).encode("utf-8"),
+                    "application/json; charset=utf-8",
+                    {"Set-Cookie": f"{self.session_cookie}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"},
+                )
+                return
+            if path == "/api/auth/logout":
+                self.application.auth.revoke_session(self._session_token())
+                self._send(
+                    200,
+                    json.dumps({"result": "Sesión cerrada."}).encode("utf-8"),
+                    "application/json; charset=utf-8",
+                    {"Set-Cookie": f"{self.session_cookie}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"},
+                )
+                return
+
+            user = self._current_user()
+            if not user:
+                self._deny(401, "Iniciá sesión para continuar.")
+                return
+            if not self._authorize_post(path, body, user):
+                return
             service = self.application.retail
-            if path == "/api/locations":
+            if path == "/api/users":
+                result = self.application.auth.create_user(
+                    body["username"],
+                    body["password"],
+                    body["role"],
+                    int(body["location_id"]) if body.get("location_id") else None,
+                )
+            elif path.startswith("/api/users/") and path.endswith("/password"):
+                user_id = int(path.removeprefix("/api/users/").removesuffix("/password").strip("/"))
+                self.application.auth.reset_password(
+                    user_id, body["password"], user["id"], self._session_token()
+                )
+                result = "Contraseña actualizada."
+            elif path.startswith("/api/users/") and path.endswith("/delete"):
+                user_id = int(path.removeprefix("/api/users/").removesuffix("/delete").strip("/"))
+                self.application.auth.delete_user(user_id, user["id"])
+                result = "Cuenta desactivada."
+            elif path == "/api/locations":
                 result = service.create_location(body["code"], body["name"], body["type"])
+            elif path.startswith("/api/locations/"):
+                location_id, action = path.removeprefix("/api/locations/").rsplit("/", 1)
+                if action == "update":
+                    service.update_location(
+                        int(location_id), body["code"], body["name"], body["type"]
+                    )
+                    result = "Ubicación actualizada."
+                elif action == "delete":
+                    service.delete_location(int(location_id))
+                    result = "Ubicación eliminada."
+                else:
+                    self._json(404, {"error": "Acción de ubicación desconocida."})
+                    return
             elif path == "/api/suppliers":
                 result = service.create_supplier(body["tax_id"], body["name"], body.get("phone", ""), body.get("email", ""))
+            elif path.startswith("/api/suppliers/"):
+                supplier_id, action = path.removeprefix("/api/suppliers/").rsplit("/", 1)
+                if action == "update":
+                    service.update_supplier(
+                        int(supplier_id), body["tax_id"], body["name"],
+                        body.get("phone", ""), body.get("email", ""),
+                    )
+                    result = "Proveedor actualizado."
+                elif action == "delete":
+                    service.delete_supplier(int(supplier_id))
+                    result = "Proveedor eliminado."
+                else:
+                    self._json(404, {"error": "Acción de proveedor desconocida."})
+                    return
+            elif path == "/api/categories":
+                result = service.create_category(body["name"])
+            elif path.startswith("/api/categories/"):
+                category_id, action = path.removeprefix("/api/categories/").rsplit("/", 1)
+                if action == "rename":
+                    service.rename_category(int(category_id), body["name"])
+                    result = "Categoría actualizada."
+                elif action == "delete":
+                    service.delete_category(int(category_id))
+                    result = "Categoría eliminada."
+                else:
+                    self._json(404, {"error": "Acción de categoría desconocida."})
+                    return
+            elif path == "/api/customers":
+                result = service.create_customer(
+                    body["code"], body["name"], body.get("phone", ""), body.get("email", ""), body.get("credit_limit", 0)
+                )
             elif path == "/api/products":
-                result = service.create_product(body["sku"], body["name"], body["category"], body["cost"], body["price"], int(body["minimum_stock"]), body.get("supplier_id") or None)
+                result = service.create_product(
+                    body["sku"], body["name"], body["category"], body["cost"], body["price"],
+                    int(body["minimum_stock"]), body.get("supplier_id") or None, body.get("tracking_mode", "none"),
+                )
+            elif path.startswith("/api/products/"):
+                product_id, action = path.removeprefix("/api/products/").rsplit("/", 1)
+                if action == "update":
+                    service.update_product(
+                        int(product_id), body["sku"], body["name"], body["category"],
+                        body["cost"], body["price"], int(body["minimum_stock"]),
+                        int(body["supplier_id"]) if body.get("supplier_id") else None,
+                        body.get("tracking_mode", "none"),
+                    )
+                    result = "Producto actualizado."
+                elif action == "delete":
+                    service.delete_product(int(product_id))
+                    result = "Producto eliminado."
+                else:
+                    self._json(404, {"error": "Acción de producto desconocida."})
+                    return
             elif path == "/api/stock":
-                service.adjust_stock(body["location_code"], body["sku"], int(body["delta"]), body.get("reason", "ajuste"))
+                service.adjust_stock(
+                    body["location_code"], body["sku"], int(body["delta"]), body.get("reason", "ajuste"),
+                    body.get("lot_code", ""), body.get("expiry_date"), body.get("serials"),
+                )
                 result = "Stock actualizado."
+            elif path == "/api/purchase-orders":
+                result = service.create_purchase_order(
+                    int(body["supplier_id"]), {key: int(value) for key, value in body["items"].items()}
+                )
+            elif path.startswith("/api/purchase-orders/") and path.endswith("/receive"):
+                order_id = int(path.removeprefix("/api/purchase-orders/").removesuffix("/receive").strip("/"))
+                service.receive_purchase_order(
+                    order_id,
+                    {key: int(value) for key, value in body["items"].items()},
+                    body.get("trace", {}),
+                )
+                result = "Recepción de compra registrada."
+            elif path == "/api/price-lists":
+                result = service.create_price_list(body["name"], body["prices"])
+            elif path.startswith("/api/price-lists/"):
+                price_list_id, action = path.removeprefix("/api/price-lists/").rsplit("/", 1)
+                if action == "update":
+                    service.update_price_list(int(price_list_id), body["name"], body["prices"])
+                    result = "Lista de precios actualizada."
+                elif action == "delete":
+                    service.delete_price_list(int(price_list_id))
+                    result = "Lista de precios eliminada."
+                else:
+                    self._json(404, {"error": "Acción de lista de precios desconocida."})
+                    return
+            elif path == "/api/promotions":
+                percentage = body.get("kind") == "percent"
+                value = round(float(body["value"]) * 100) if percentage else int(round(float(body["value"]) * 100))
+                result = service.create_promotion(
+                    body["name"], body["kind"], value, body["starts_at"], body["ends_at"],
+                    body.get("sku") or None, body.get("category") or None,
+                )
+            elif path == "/api/inventory-counts":
+                result = service.open_inventory_count(body["location_code"])
+            elif path.startswith("/api/inventory-counts/"):
+                count_id, action = path.removeprefix("/api/inventory-counts/").rsplit("/", 1)
+                if action == "lines":
+                    service.set_inventory_count(
+                        int(count_id),
+                        {key: int(value) for key, value in body["quantities"].items()},
+                        body.get("trace", {}),
+                    )
+                    result = "Conteo guardado."
+                elif action == "close":
+                    service.close_inventory_count(int(count_id))
+                    result = "Inventario físico conciliado."
+                else:
+                    self._json(404, {"error": "Acción de inventario desconocida."})
+                    return
             elif path == "/api/orders":
                 result = service.create_replenishment(body["destination_code"], {key: int(value) for key, value in body["items"].items()})
+            elif path == "/api/replenishment-batches":
+                result = service.create_consolidated_replenishment(body["destinations"])
             elif path == "/api/packages":
                 result = service.pack(int(body["order_id"]), body["code"], body["dispatch_note"], {key: int(value) for key, value in body["items"].items()})
             elif path.startswith("/api/packages/"):
@@ -196,6 +879,8 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                     body["location_code"],
                     {line["sku"]: int(line["quantity"]) for line in body["items"]},
                     {payment["method"]: payment["amount"] for payment in body["payments"]},
+                    int(body["customer_id"]) if body.get("customer_id") else None,
+                    int(body["price_list_id"]) if body.get("price_list_id") else None,
                 )
             elif path == "/api/returns":
                 result = service.return_items(body["receipt"], {line["sku"]: int(line["quantity"]) for line in body["items"]}, bool(body["restock"]))
