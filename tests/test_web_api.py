@@ -1,4 +1,5 @@
 import json
+import random
 import re
 import unittest
 from http.server import HTTPServer
@@ -6,8 +7,9 @@ from threading import Thread
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from container import create_application
-from web_server import RetailWebHandler
+from backend.container import create_application
+from backend.datos.seed import create_random_seed
+from backend.api.web_server import RetailWebHandler
 
 
 class WebApiTests(unittest.TestCase):
@@ -74,7 +76,8 @@ class WebApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(status, 201, result)
-        self.login("centro", "clave-segura-centro")
+        self.application.auth.create_user("admin", "clave-segura-admin", "ADMIN", None)
+        self.login("admin", "clave-segura-admin")
 
     def login(self, username: str, password: str):
         status, result = self.post("/api/auth/login", {"username": username, "password": password})
@@ -83,25 +86,34 @@ class WebApiTests(unittest.TestCase):
     def test_web_app_and_full_business_workflow(self):
         status, html = self.request("/")
         self.assertEqual(status, 200)
-        self.assertIn(b"Faro | Operaciones comerciales", html)
+        self.assertIn(b"La pulga mercado | Ventas e Inventario", html)
+        self.assertIn("🐐".encode("utf-8"), html)
         self.assertIn(b'id="receipt-dialog"', html)
-        self.assertIn(b'id="view-perfiles" data-roles="CD"', html)
+        self.assertIn(b'id="view-usuarios" data-roles="ADMIN"', html)
+        self.assertIn(b'data-view="mermas" data-roles="CD"', html)
+        self.assertIn(b'id="daily-sales-chart"', html)
         self.assertIn(b'id="user-role"', html)
         self.assertIn(b'Crear perfil de acceso', html)
-        self.assertIn(b'Bienvenido a Faro', html)
+        self.assertIn(b'Ventas e Inventario', html)
         self.assertIn(b'Registrar usuario', html)
         self.assertIn(b'id="register-form"', html)
         self.assertIn(b'<option value="LOCAL">Local</option>', html)
         self.assertIn(b'<option value="CD">Centro de Distribuci\xc3\xb3n</option>', html)
+        self.assertIn(b'<option value="ADMIN">Administrador</option>', html)
         self.assertIn(b'id="setup-form"', html)
         self.assertIn(b'Rol del perfil', html)
 
+        _, auth_status = self.request("/api/auth/status")
+        self.assertEqual(json.loads(auth_status)["demo_shortcuts"], [])
         status, bootstrap = self.request("/api/bootstrap")
         self.assertEqual(status, 401)
         self.initialize_accounts()
         status, bootstrap = self.request("/api/bootstrap")
         self.assertEqual(status, 200)
-        self.assertEqual(len(json.loads(bootstrap)["locations"]), 2)
+        bootstrap_data = json.loads(bootstrap)
+        self.assertEqual(len(bootstrap_data["locations"]), 2)
+        self.assertNotIn("lots", bootstrap_data)
+        self.assertNotIn("serials", bootstrap_data)
         supplier_status, supplier = self.post("/api/suppliers", {"tax_id": "TEST-1", "name": "Proveedor"})
         self.assertEqual(supplier_status, 201)
         product_status, product = self.post(
@@ -109,14 +121,38 @@ class WebApiTests(unittest.TestCase):
             {"sku": "SKU-1", "name": "Producto", "category": "General", "cost": "4.50", "price": "10.00", "minimum_stock": 1, "supplier_id": supplier["result"]},
         )
         self.assertEqual(product_status, 201)
+        _, bootstrap = self.request("/api/bootstrap")
+        product_data = next(item for item in json.loads(bootstrap)["products"] if item["sku"] == "SKU-1")
+        self.assertNotIn("tracking_mode", product_data)
         self.assertEqual(self.post("/api/stock", {"location_code": "CD", "sku": "SKU-1", "delta": 10})[0], 201)
 
         self.login("local01", "clave-segura-local")
         order_status, order = self.post("/api/orders", {"destination_code": "L01", "items": {"SKU-1": 4}})
         self.assertEqual(order_status, 201)
         self.login("centro", "clave-segura-centro")
-        package_status, package = self.post("/api/packages", {"order_id": order["result"], "code": "B-1", "dispatch_note": "R-1", "items": {"SKU-1": 4}})
+        package_status, package = self.post(
+            "/api/packages",
+            {
+                "destination_code": "L01",
+                "code": "B-1",
+                "dispatch_note": "R-1",
+                "items": {"SKU-1": 4},
+            },
+        )
         self.assertEqual(package_status, 201)
+        _, bootstrap = self.request("/api/bootstrap")
+        recorded_package = next(
+            item for item in json.loads(bootstrap)["packages"] if item["code"] == "B-1"
+        )
+        self.assertEqual(recorded_package["destination_name"], "Local")
+        self.assertEqual(
+            [linked_order["id"] for linked_order in recorded_package["orders"]],
+            [order["result"]],
+        )
+        self.assertEqual(
+            recorded_package["order_lines"],
+            [{"order_id": order["result"], "sku": "SKU-1", "quantity": 4}],
+        )
         self.assertEqual(self.post("/api/packages/B-1/seal", {"seal": "PREC-1"})[0], 201)
         self.assertEqual(self.post("/api/packages/B-1/dispatch", {})[0], 201)
         self.assertEqual(self.post("/api/packages/B-1/receive", {"seal_intact": True, "dispatch_note_ok": True})[0], 403)
@@ -128,7 +164,17 @@ class WebApiTests(unittest.TestCase):
         self.assertIn("Stock verificado insuficiente", error["error"])
 
         self.assertEqual(self.post("/api/packages/B-1/verify", {})[0], 201)
-        sale_status, sale = self.post("/api/sales", {"location_code": "L01", "items": [{"sku": "SKU-1", "quantity": 2}], "payments": [{"method": "efectivo", "amount": "20.00"}]})
+        sale_status, sale = self.post(
+            "/api/sales",
+            {
+                "location_code": "L01",
+                "items": [{"sku": "SKU-1", "quantity": 2}],
+                "payments": [
+                    {"method": "efectivo", "amount": "10.00"},
+                    {"method": "efectivo", "amount": "15.00"},
+                ],
+            },
+        )
         self.assertEqual(sale_status, 201)
         self.assertTrue(sale["result"].startswith("V-"))
         pdf_status, pdf = self.request(f"/api/sales/{sale['result']}/receipt.pdf")
@@ -143,7 +189,8 @@ class WebApiTests(unittest.TestCase):
         self.assertIn(sale["result"].encode("ascii"), pdf)
         self.assertIn(b"Producto", pdf)
         self.assertIn(b"Sucursal Local", pdf)
-        self.assertIn(b"Subtotal", pdf)
+        self.assertIn(b"TOTAL", pdf)
+        self.assertNotIn(b"Descuento", pdf)
         self.assertIn(b"TOTAL", pdf)
         self.assertIn(b"Pagado con", pdf)
         self.assertIn(b"Efectivo", pdf)
@@ -170,8 +217,24 @@ class WebApiTests(unittest.TestCase):
         report_data = json.loads(reports)
         self.assertEqual(report_data["best_sellers"][0]["net_units"], 1)
         self.assertEqual(report_data["logistics"]["verified_packages"], 1)
+        self.assertEqual(sum(row["net_cents"] for row in report_data["daily_sales"]), 1000)
 
-    def test_purchase_customer_pricing_and_inventory_count_endpoints(self):
+    def test_seeded_accounts_expose_demo_shortcuts_and_can_login(self):
+        create_random_seed(self.application, days=1, rng=random.Random(23))
+        status, response = self.request("/api/auth/status")
+        self.assertEqual(status, 200)
+        shortcuts = json.loads(response)["demo_shortcuts"]
+        self.assertEqual(len(shortcuts), 4)
+        self.assertIn(b'id="demo-access-buttons"', self.request("/")[1])
+
+        status, result = self.post(
+            "/api/auth/login",
+            {"username": shortcuts[0]["username"], "password": shortcuts[0]["password"]},
+        )
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["user"]["role"], "ADMIN")
+
+    def test_purchase_and_inventory_count_endpoints(self):
         self.initialize_accounts()
         _, supplier = self.post("/api/suppliers", {"tax_id": "SUP-API", "name": "Proveedor API"})
         _, product = self.post(
@@ -194,22 +257,6 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(receive_status, 201)
 
-        customer_status, customer = self.post(
-            "/api/customers", {"code": "CLI-API", "name": "Cliente API", "credit_limit": 25}
-        )
-        self.assertEqual(customer_status, 201)
-        list_status, price_list = self.post(
-            "/api/price-lists", {"name": "Mayorista API", "prices": {"API-1": 4}}
-        )
-        self.assertEqual(list_status, 201)
-        promotion_status, _ = self.post(
-            "/api/promotions",
-            {
-                "name": "Promo API", "kind": "percent", "value": 10,
-                "starts_at": "2020-01-01", "ends_at": "2999-12-31", "sku": "API-1",
-            },
-        )
-        self.assertEqual(promotion_status, 201)
         count_status, count = self.post("/api/inventory-counts", {"location_code": "L01"})
         self.assertEqual(count_status, 201)
         lines_status, _ = self.post(
@@ -222,9 +269,10 @@ class WebApiTests(unittest.TestCase):
 
         _, bootstrap = self.request("/api/bootstrap")
         result = json.loads(bootstrap)
-        self.assertEqual(result["customers"][0]["id"], customer["result"])
-        self.assertEqual(result["price_lists"][0]["id"], price_list["result"])
         self.assertEqual(result["inventory_counts"][0]["status"], "Cerrado")
+        for removed_key in ("customers", "price_lists", "price_list_items", "promotions"):
+            self.assertNotIn(removed_key, result)
+        self.assertEqual(self.post("/api/customers", {})[0], 403)
 
     def test_category_management_and_consolidated_replenishment_api(self):
         self.initialize_accounts()
@@ -247,8 +295,12 @@ class WebApiTests(unittest.TestCase):
             f"/api/categories/{category['result']}/delete", {}
         )
         self.assertEqual(delete_status, 400)
-        self.assertIn("usan productos o promociones", delete_error["error"])
+        self.assertIn("usan productos", delete_error["error"])
 
+        batch_status, batch = self.post(
+            "/api/auth/login", {"username": "centro", "password": "clave-segura-centro"}
+        )
+        self.assertEqual(batch_status, 200)
         batch_status, batch = self.post(
             "/api/replenishment-batches",
             {"destinations": [
@@ -290,16 +342,9 @@ class WebApiTests(unittest.TestCase):
             {
                 "sku": "CRUD-2", "name": "Detergente líquido", "category": "Limpieza",
                 "cost": 3.5, "price": 6, "minimum_stock": 4,
-                "supplier_id": supplier["result"], "tracking_mode": "none",
+                "supplier_id": supplier["result"],
             },
         )[0], 201)
-        _, price_list = self.post("/api/price-lists", {"name": "Minorista", "prices": {"CRUD-2": 5.5}})
-        self.assertEqual(self.post(
-            f"/api/price-lists/{price_list['result']}/update",
-            {"name": "Minorista actualizado", "prices": {"CRUD-2": 5.75}},
-        )[0], 201)
-        self.assertEqual(self.post(f"/api/price-lists/{price_list['result']}/delete", {})[0], 201)
-
         self.assertEqual(self.post(f"/api/products/{product['result']}/delete", {})[0], 201)
         self.assertEqual(self.post(f"/api/categories/{category['result']}/delete", {})[0], 201)
         self.assertEqual(self.post(f"/api/suppliers/{supplier['result']}/delete", {})[0], 201)
@@ -378,6 +423,44 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(
             self.application.auth.authenticate("primer-centro", "clave-segura-centro")["location_id"],
             None,
+        )
+
+    def test_first_start_admin_and_role_permissions(self):
+        status, result = self.post(
+            "/api/auth/setup",
+            {
+                "role": "ADMIN",
+                "username": "primer-admin",
+                "password": "clave-segura-admin",
+            },
+        )
+        self.assertEqual(status, 201, result)
+        self.login("primer-admin", "clave-segura-admin")
+        self.assertEqual(self.application.auth.session_user(self.cookie.split("=", 1)[1])["role"], "ADMIN")
+        self.assertEqual(
+            self.application.repository.one("SELECT type FROM locations WHERE code='CD'")["type"],
+            "CD",
+        )
+        store_id = self.post(
+            "/api/locations", {"code": "ADMIN-LOCAL", "name": "Local Admin", "type": "LOCAL"}
+        )[1]["result"]
+        self.assertEqual(
+            self.post(
+                "/api/users",
+                {
+                    "username": "usuario-admin",
+                    "password": "clave-segura-usuario",
+                    "role": "LOCAL",
+                    "location_id": store_id,
+                },
+            )[0],
+            201,
+        )
+        self.assertEqual(self.post("/api/sales", {"location_code": "ADMIN-LOCAL"})[0], 403)
+        self.login("usuario-admin", "clave-segura-usuario")
+        self.assertEqual(
+            self.post("/api/users", {"username": "no-admin", "password": "clave-segura-otro", "role": "ADMIN"})[0],
+            403,
         )
 
     def test_first_start_registers_local_and_creates_central_location(self):
@@ -512,10 +595,13 @@ class WebApiTests(unittest.TestCase):
 
         self.login("centro", "clave-segura-centro")
         cd_bootstrap = json.loads(self.request("/api/bootstrap")[1])
-        local_user_id = next(user["id"] for user in cd_bootstrap["users"] if user["username"] == "local01")
+        self.assertNotIn("users", cd_bootstrap)
+        self.login("admin", "clave-segura-admin")
+        admin_bootstrap = json.loads(self.request("/api/bootstrap")[1])
+        local_user_id = next(user["id"] for user in admin_bootstrap["users"] if user["username"] == "local01")
         self.login("local01", "clave-segura-local")
         old_local_session = self.cookie
-        self.login("centro", "clave-segura-centro")
+        self.login("admin", "clave-segura-admin")
         self.assertEqual(
             self.post(
                 f"/api/users/{local_user_id}/password",

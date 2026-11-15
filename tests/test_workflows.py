@@ -1,13 +1,13 @@
 import sqlite3
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from exceptions import BusinessRuleError
-from repositories.sqlite_repository import SQLiteRepository
-from services.report_service import ReportService
-from services.retail_service import RetailService
+from backend.dominio.exceptions import BusinessRuleError
+from backend.persistencia.sqlite_repository import SQLiteRepository
+from backend.servicios.report_service import ReportService
+from backend.servicios.retail_service import RetailService
 
 
 class RetailWorkflowTests(unittest.TestCase):
@@ -30,8 +30,8 @@ class RetailWorkflowTests(unittest.TestCase):
         self.service.dispatch(code)
         return order_id
 
-    def _deliver(self, sku, quantity, code, lot_code="", expiry_date=None):
-        self.service.adjust_stock("CD", sku, quantity, "recepción inicial", lot_code, expiry_date)
+    def _deliver(self, sku, quantity, code):
+        self.service.adjust_stock("CD", sku, quantity, "recepción inicial")
         order_id = self.service.create_replenishment("L01", {sku: quantity})
         self.service.pack(order_id, code, f"R-{code}", {sku: quantity})
         self.service.seal_package(code, f"PREC-{code}")
@@ -79,7 +79,37 @@ class RetailWorkflowTests(unittest.TestCase):
             self.service.return_items(receipt, {"SKU-1": 2})
         sales = self.reports.sales_by_period("2000-01-01", "2999-12-31")
         self.assertEqual(sum(row["net_cents"] for row in sales), 1000)
-        self.assertEqual(self.reports.best_sellers_and_margin("2000-01-01", "2999-12-31")[0]["margin_cents"], 550)
+        margin = self.reports.best_sellers_and_margin("2000-01-01", "2999-12-31")[0]["margin_cents"]
+        self.assertEqual(margin, 550)
+
+    def test_cash_overpayment_records_only_the_amount_due_and_mixed_payment_change(self):
+        self._package()
+        self.service.receive("B-1", seal_intact=True)
+        self.service.verify_package("B-1")
+
+        cash_receipt = self.service.sell("L01", {"SKU-1": 1}, {"efectivo": "15.00"})
+        cash_payments = self.repository.all(
+            """SELECT p.method,p.amount_cents FROM payments p
+               JOIN sales s ON s.id=p.sale_id WHERE s.receipt=?""",
+            (cash_receipt,),
+        )
+        self.assertEqual(
+            [(payment["method"], payment["amount_cents"]) for payment in cash_payments],
+            [("efectivo", 1000)],
+        )
+
+        mixed_receipt = self.service.sell(
+            "L01", {"SKU-1": 1}, {"efectivo": "7.00", "tarjeta": "5.00"}
+        )
+        mixed_payments = self.repository.all(
+            """SELECT p.method,p.amount_cents FROM payments p
+               JOIN sales s ON s.id=p.sale_id WHERE s.receipt=? ORDER BY p.method""",
+            (mixed_receipt,),
+        )
+        self.assertEqual(
+            [(payment["method"], payment["amount_cents"]) for payment in mixed_payments],
+            [("efectivo", 500), ("tarjeta", 500)],
+        )
 
     def test_sale_state_transitions_from_confirmed_to_partial_and_returned(self):
         self._package()
@@ -149,136 +179,24 @@ class RetailWorkflowTests(unittest.TestCase):
             )["quantity"],
             3,
         )
-        self.assertEqual(
-            self.repository.one(
-                "SELECT COUNT(*) AS count FROM serial_numbers WHERE location_id=? AND product_id=(SELECT id FROM products WHERE sku='SKU-2') AND status='available'",
-                (self.cd,),
-            )["count"],
-            3,
-        )
-
-    def test_best_sale_price_uses_promotion_and_updates_customer_account_and_points(self):
+    def test_sale_uses_product_price_and_rejects_current_account_payment(self):
         self._package()
         self.service.receive("B-1", seal_intact=True)
         self.service.verify_package("B-1")
-        price_list_id = self.service.create_price_list("Mayorista", {"SKU-1": "10.00"})
-        promotion_id = self.service.create_promotion(
-            "Descuento 20", "percent", 2000, date.today().isoformat(), date.today().isoformat(), sku="SKU-1"
-        )
-        customer_id = self.service.create_customer("CLI-1", "Cliente", credit_limit="20.00")
-        receipt = self.service.sell(
-            "L01", {"SKU-1": 1}, {"cuenta corriente": "8.00"}, customer_id, price_list_id
-        )
-        sale = self.repository.one("SELECT total_cents,price_list_id,customer_id FROM sales WHERE receipt=?", (receipt,))
-        line = self.repository.one("SELECT unit_price_cents,discount_cents,promotion_id FROM sale_lines WHERE sale_id=(SELECT id FROM sales WHERE receipt=?)", (receipt,))
-        customer = self.repository.one("SELECT balance_cents,loyalty_points FROM customers WHERE id=?", (customer_id,))
-        self.assertEqual(sale["total_cents"], 800)
-        self.assertEqual(sale["price_list_id"], price_list_id)
-        self.assertEqual(sale["customer_id"], customer_id)
-        self.assertEqual(line["unit_price_cents"], 800)
-        self.assertEqual(line["discount_cents"], 200)
-        self.assertEqual(line["promotion_id"], promotion_id)
-        self.assertEqual((customer["balance_cents"], customer["loyalty_points"]), (800, 0))
-        self.service.return_items(receipt, {"SKU-1": 1})
-        customer = self.repository.one("SELECT balance_cents FROM customers WHERE id=?", (customer_id,))
-        self.assertEqual(customer["balance_cents"], 0)
 
-    def test_lot_tracking_uses_fefo_and_restores_returned_lot(self):
-        self.service.create_product("LOT-1", "Producto lote", "General", 2, 10, 0, tracking_mode="lot")
-        self._deliver("LOT-1", 1, "LOT-LATE", "LOT-LATE", (date.today() + timedelta(days=8)).isoformat())
-        self._deliver("LOT-1", 1, "LOT-EARLY", "LOT-EARLY", (date.today() + timedelta(days=3)).isoformat())
-        receipt = self.service.sell("L01", {"LOT-1": 1}, {"efectivo": 10})
-        trace = self.repository.one(
-            """SELECT l.code FROM sale_line_trace st
-               JOIN serial_numbers sn ON sn.id=st.serial_id JOIN lots l ON l.id=sn.lot_id
-               JOIN sale_lines sl ON sl.id=st.sale_line_id JOIN sales s ON s.id=sl.sale_id
-               WHERE s.receipt=?""",
-            (receipt,),
-        )
-        self.assertEqual(trace["code"], "LOT-EARLY")
-        self.service.return_items(receipt, {"LOT-1": 1})
-        early = self.repository.one(
-            """SELECT lots.quantity FROM lots JOIN locations ON locations.id=lots.location_id
-               WHERE lots.code='LOT-EARLY' AND locations.code='L01'"""
-        )["quantity"]
-        self.assertEqual(early, 1)
-        self.assertEqual(
-            self.repository.one(
-                """SELECT COUNT(*) AS count FROM serial_numbers sn JOIN lots l ON l.id=sn.lot_id
-                   JOIN locations ON locations.id=l.location_id
-                   WHERE l.code='LOT-EARLY' AND locations.code='L01' AND sn.status='available'"""
-            )["count"],
-            1,
-        )
-
-    def test_every_stocked_unit_gets_a_random_unique_serial(self):
-        self.service.create_product("SER-1", "Equipo", "General", 20, 50, 0, tracking_mode="serial")
-        self._deliver("SER-1", 3, "SERIAL-BULK")
-        serials = self.repository.all(
-            "SELECT serial FROM serial_numbers WHERE product_id=(SELECT id FROM products WHERE sku='SER-1')"
-        )
-        values = [row["serial"] for row in serials]
-        self.assertEqual(len(values), 3)
-        self.assertEqual(len(set(values)), 3)
-        self.assertTrue(all(value.startswith("SN-") for value in values))
-        with self.assertRaisesRegex(BusinessRuleError, "se generan automáticamente"):
-            self.service.adjust_stock("CD", "SER-1", 1, "compra", serials=["SN-MANUAL"])
-
-    def test_serial_sale_and_return_update_serial_status(self):
-        self.service.create_product("SER-2", "Equipo serializado", "General", 20, 50, 0, tracking_mode="serial")
-        self._deliver("SER-2", 1, "SERIAL-SALE")
-        serial = self.repository.one(
-            "SELECT serial FROM serial_numbers WHERE product_id=(SELECT id FROM products WHERE sku='SER-2')"
-        )["serial"]
-
-        receipt = self.service.sell("L01", {"SER-2": 1}, {"efectivo": 50})
-        status = self.repository.one("SELECT status FROM serial_numbers WHERE serial=?", (serial,))["status"]
-        self.assertEqual(status, "sold")
-
-        self.service.return_items(receipt, {"SER-2": 1})
-        status = self.repository.one("SELECT status FROM serial_numbers WHERE serial=?", (serial,))["status"]
-        self.assertEqual(status, "available")
-
-    def test_untracked_products_receive_auto_serials_and_keep_them_after_replenishment(self):
-        self.service.adjust_stock("CD", "SKU-1", 2, "ingreso")
-        serials_before = {
-            row["serial"]
-            for row in self.repository.all(
-                "SELECT serial FROM serial_numbers WHERE location_id=? AND product_id=(SELECT id FROM products WHERE sku='SKU-1') AND status='available'",
-                (self.cd,),
-            )
-        }
-        self.assertEqual(len(serials_before), 22)
-
-        order_id = self.service.create_replenishment("L01", {"SKU-1": 2})
-        self.service.pack(order_id, "B-SERIAL", "R-SERIAL", {"SKU-1": 2})
-        self.service.seal_package("B-SERIAL", "PREC-SERIAL")
-        self.service.dispatch("B-SERIAL")
-        self.service.receive("B-SERIAL", seal_intact=True)
-        self.service.verify_package("B-SERIAL")
-        serials_at_store = {
-            row["serial"]
-            for row in self.repository.all(
-                """SELECT serial FROM serial_numbers WHERE location_id=? AND product_id=
-                   (SELECT id FROM products WHERE sku='SKU-1') AND status='available'""",
-                (self.store,),
-            )
-        }
-        self.assertTrue(serials_at_store)
-        self.assertEqual(len(serials_at_store), 2)
-        self.assertTrue(serials_at_store.issubset(serials_before))
-
-    def test_account_credit_limit_blocks_sale_without_changing_stock(self):
-        self._package()
-        self.service.receive("B-1", seal_intact=True)
-        self.service.verify_package("B-1")
-        customer_id = self.service.create_customer("CLI-LIMIT", "Cliente", credit_limit="5.00")
-
-        with self.assertRaisesRegex(BusinessRuleError, "supera el crédito disponible"):
-            self.service.sell("L01", {"SKU-1": 1}, {"cuenta corriente": "10.00"}, customer_id)
+        with self.assertRaisesRegex(BusinessRuleError, "Medio de pago no admitido"):
+            self.service.sell("L01", {"SKU-1": 1}, {"cuenta corriente": "10.00"})
 
         self.assertEqual(self._stock(), 5)
         self.assertEqual(self.repository.one("SELECT COUNT(*) AS count FROM sales")["count"], 0)
+        receipt = self.service.sell("L01", {"SKU-1": 1}, {"efectivo": "10.00"})
+        sale = self.repository.one("SELECT total_cents FROM sales WHERE receipt=?", (receipt,))
+        line = self.repository.one(
+            "SELECT unit_price_cents FROM sale_lines WHERE sale_id=(SELECT id FROM sales WHERE receipt=?)",
+            (receipt,),
+        )
+        self.assertEqual(sale["total_cents"], 1000)
+        self.assertEqual(line["unit_price_cents"], 1000)
 
     def test_physical_count_reconciles_stock_and_audits_delta(self):
         count_id = self.service.open_inventory_count("L01")
@@ -290,28 +208,6 @@ class RetailWorkflowTests(unittest.TestCase):
             (str(count_id),),
         )
         self.assertEqual((movement["quantity_delta"], movement["movement_type"]), (4, "conciliación inventario físico"))
-
-    def test_physical_count_updates_lot_quantities_and_rejects_duplicate_lots(self):
-        self.service.create_product("LOT-2", "Producto por lote", "General", 2, 10, 0, tracking_mode="lot")
-        expiry = (date.today() + timedelta(days=8)).isoformat()
-        self._deliver("LOT-2", 2, "LOT-COUNT", "LOT-A", expiry)
-        count_id = self.service.open_inventory_count("L01")
-
-        with self.assertRaisesRegex(BusinessRuleError, "no pueden repetirse"):
-            self.service.set_inventory_count(
-                count_id,
-                {"SKU-1": 0, "LOT-2": 2},
-                {"LOT-2": {"lots": [{"code": "LOT-A", "quantity": 1}, {"code": "LOT-A", "quantity": 1}]}},
-            )
-        self.service.set_inventory_count(
-            count_id, {"SKU-1": 0, "LOT-2": 2}, {"LOT-2": {"lots": [{"code": "LOT-A", "quantity": 2, "expiry_date": expiry}]}}
-        )
-        self.service.close_inventory_count(count_id)
-        lot = self.repository.one(
-            """SELECT lots.quantity FROM lots JOIN locations ON locations.id=lots.location_id
-               WHERE lots.code='LOT-A' AND locations.code='L01'"""
-        )
-        self.assertEqual(lot["quantity"], 2)
 
     def test_product_and_supplier_identifiers_are_unique(self):
         supplier_id = self.service.create_supplier("TAX-1", "Proveedor")
@@ -397,6 +293,67 @@ class RetailWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(stock["quantity"], 3)
 
+    def test_one_package_allocates_quantities_across_same_local_orders_oldest_first(self):
+        first_order = self.service.create_replenishment("L01", {"SKU-1": 2})
+        second_order = self.service.create_replenishment("L01", {"SKU-1": 3})
+
+        package_id = self.service.pack_for_destination(
+            "L01", "B-CONSOLIDATED", "R-CONSOLIDATED", {"SKU-1": 4}
+        )
+        allocations = self.repository.all(
+            """SELECT pol.order_id,pol.quantity FROM package_order_lines pol
+               WHERE pol.package_id=? ORDER BY pol.order_id""",
+            (package_id,),
+        )
+        self.assertEqual(
+            [(line["order_id"], line["quantity"]) for line in allocations],
+            [(first_order, 2), (second_order, 2)],
+        )
+
+        self.service.seal_package("B-CONSOLIDATED", "PREC-CONSOLIDATED")
+        self.service.dispatch("B-CONSOLIDATED")
+        self.service.receive("B-CONSOLIDATED", seal_intact=True)
+        self.service.verify_package("B-CONSOLIDATED")
+        statuses = self.repository.all(
+            "SELECT id,status FROM replenishment_orders WHERE id IN (?,?) ORDER BY id",
+            (first_order, second_order),
+        )
+        self.assertEqual(
+            [(order["id"], order["status"]) for order in statuses],
+            [(first_order, "Completada"), (second_order, "Preparando")],
+        )
+        self.assertEqual(self._stock(), 4)
+
+    def test_rejected_consolidated_package_reopens_all_linked_orders(self):
+        first_order = self.service.create_replenishment("L01", {"SKU-1": 2})
+        second_order = self.service.create_replenishment("L01", {"SKU-1": 3})
+        self.service.pack_for_destination(
+            "L01", "B-CONSOLIDATED-REJECTED", "R-CONSOLIDATED-REJECTED",
+            {"SKU-1": 4},
+        )
+        self.service.seal_package("B-CONSOLIDATED-REJECTED", "PREC-CONSOLIDATED-REJECTED")
+        self.service.dispatch("B-CONSOLIDATED-REJECTED")
+        self.assertEqual(
+            self.service.receive("B-CONSOLIDATED-REJECTED", seal_intact=False),
+            "Rechazado",
+        )
+        statuses = self.repository.all(
+            "SELECT id,status FROM replenishment_orders WHERE id IN (?,?) ORDER BY id",
+            (first_order, second_order),
+        )
+        self.assertEqual([order["status"] for order in statuses], ["Con rechazo", "Con rechazo"])
+
+        retry_package = self.service.pack_for_destination(
+            "L01", "B-CONSOLIDATED-RETRY", "R-CONSOLIDATED-RETRY", {"SKU-1": 4}
+        )
+        retry_orders = self.repository.all(
+            "SELECT order_id FROM package_orders WHERE package_id=? ORDER BY order_id",
+            (retry_package,),
+        )
+        self.assertEqual(
+            [order["order_id"] for order in retry_orders], [first_order, second_order]
+        )
+
     def test_logistics_reports_filter_period_and_location_and_value_waste(self):
         self._package()
         self.service.receive("B-1", seal_intact=False)
@@ -407,25 +364,27 @@ class RetailWorkflowTests(unittest.TestCase):
         receipt = self.service.sell("L01", {"SKU-1": 1}, {"efectivo": 10})
         self.service.return_items(receipt, {"SKU-1": 1}, restock=False)
 
-        today = date.today().isoformat()
-        report = self.reports.logistics_performance(today, today, "L01")
+        today = datetime.now(timezone.utc).date()
+        today_iso = today.isoformat()
+        report = self.reports.logistics_performance(today_iso, today_iso, "L01")
         self.assertEqual(report["rejected_count"], 1)
         self.assertEqual(report["verified_packages"], 1)
         self.assertEqual(report["waste_quantity"], 1)
         self.assertEqual(report["waste_valuation_cents"], 450)
         self.assertEqual(report["waste_movements"][0]["cost_is_estimated"], 0)
 
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        yesterday = (today - timedelta(days=1)).isoformat()
         self.assertEqual(self.reports.logistics_performance(yesterday, yesterday)["rejected_count"], 0)
-        self.assertEqual(self.reports.logistics_performance(today, today, "CD")["waste_quantity"], 0)
+        self.assertEqual(
+            self.reports.logistics_performance(today_iso, today_iso, "CD")["waste_quantity"], 0
+        )
 
     def test_inventory_movement_values_use_cost_captured_at_movement_time(self):
         self._deliver("SKU-1", 3, "VALUATION-BULK")
         self.repository.execute("UPDATE products SET cost_cents=9999 WHERE sku='SKU-1'")
 
-        movements = self.reports.inventory_movements(
-            date.today().isoformat(), date.today().isoformat(), "L01"
-        )
+        today = datetime.now(timezone.utc).date().isoformat()
+        movements = self.reports.inventory_movements(today, today, "L01")
         adjustment = next(row for row in movements if row["movement_type"] == "recepción verificada")
         self.assertEqual(adjustment["valuation_delta_cents"], 1350)
         self.assertEqual(adjustment["unit_cost_cents"], 450)
@@ -478,7 +437,8 @@ class RetailWorkflowTests(unittest.TestCase):
         self.service.receive("B-1", seal_intact=True)
         self.service.verify_package("B-1")
 
-        for payments in ({}, {"efectivo": 0}, {"bitcoin": 10}, {"efectivo": 9}):
+        invalid_payments = ({}, {"efectivo": 0}, {"bitcoin": 10}, {"efectivo": 9}, {"tarjeta": 11})
+        for payments in invalid_payments:
             with self.subTest(payments=payments):
                 with self.assertRaises(BusinessRuleError):
                     self.service.sell("L01", {"SKU-1": 1}, payments)
