@@ -283,7 +283,10 @@ function addItemRow(container, selectedSku = "") {
   remove.className = "remove-row";
   remove.textContent = "Quitar";
   remove.addEventListener("click", () => {
-    if (container.children.length > 1) row.remove();
+    if (container.children.length > 1) {
+      row.remove();
+      updateMinimumStockSuggestion();
+    }
     updateSaleTotal();
   });
   row.append(product, quantity, remove);
@@ -373,7 +376,7 @@ function selectPackageDestination(destinationCode) {
   if (!remainingLines.length) addItemRow(container);
 }
 
-function addOrderItemRow(container) {
+function addOrderItemRow(container, selectedSku = "", suggestedQuantity = 1) {
   const row = document.createElement("div");
   row.className = "entry-row order-entry-row";
   const destination = document.createElement("select");
@@ -383,18 +386,23 @@ function addOrderItemRow(container) {
   const product = document.createElement("select");
   product.name = "sku";
   product.required = true;
+  const productPlaceholder = document.createElement("option");
+  productPlaceholder.value = "";
+  productPlaceholder.textContent = "Elegir producto";
+  product.append(productPlaceholder);
   for (const item of productOptions()) {
     const option = document.createElement("option");
     option.value = item.value;
     option.textContent = item.label;
     product.append(option);
   }
+  product.value = selectedSku;
   const quantity = document.createElement("input");
   quantity.name = "quantity";
   quantity.type = "number";
   quantity.min = "1";
   quantity.step = "1";
-  quantity.value = "1";
+  quantity.value = String(suggestedQuantity);
   quantity.required = true;
   const remove = document.createElement("button");
   remove.type = "button";
@@ -405,8 +413,71 @@ function addOrderItemRow(container) {
   });
   row.append(destination, product, quantity, remove);
   container.append(row);
+  row.addEventListener("input", updateMinimumStockSuggestion);
+  row.addEventListener("change", updateMinimumStockSuggestion);
   if (state.data) populateSelects();
   return row;
+}
+
+function minimumStockSuggestions() {
+  const locationCode = state.user?.location_code;
+  if (!locationCode || !state.data) return [];
+  const requestedBySku = new Map();
+  for (const row of document.querySelectorAll("#order-items .entry-row")) {
+    const sku = row.querySelector('[name="sku"]').value;
+    const quantity = Number(row.querySelector('[name="quantity"]').value);
+    if (sku && Number.isInteger(quantity) && quantity > 0) {
+      requestedBySku.set(sku, (requestedBySku.get(sku) || 0) + quantity);
+    }
+  }
+  return state.data.stock
+    .filter((item) => item.location_code === locationCode && item.quantity < item.minimum_stock)
+    .map((item) => ({
+      ...item,
+      suggested_quantity: Math.max(
+        0,
+        item.minimum_stock - item.quantity - (requestedBySku.get(item.sku) || 0),
+      ),
+    }))
+    .filter((item) => item.suggested_quantity > 0);
+}
+
+function updateMinimumStockSuggestion() {
+  const button = document.querySelector("#add-minimum-stock-items");
+  if (!button) return;
+  const count = minimumStockSuggestions().length;
+  button.disabled = count === 0;
+  button.textContent = count
+    ? `Agregar sugerencias de stock mínimo (${count})`
+    : "No hay faltantes por agregar";
+}
+
+function addMinimumStockSuggestions() {
+  const suggestions = minimumStockSuggestions();
+  if (!suggestions.length) {
+    updateMinimumStockSuggestion();
+    return;
+  }
+  const container = document.querySelector("#order-items");
+  for (const suggestion of suggestions) {
+    const existingRow = [...container.querySelectorAll(".entry-row")]
+      .find((row) => row.querySelector('[name="sku"]').value === suggestion.sku);
+    if (existingRow) {
+      const quantity = existingRow.querySelector('[name="quantity"]');
+      quantity.value = String(Number(quantity.value) + suggestion.suggested_quantity);
+    } else {
+      const emptyRow = [...container.querySelectorAll(".entry-row")]
+        .find((row) => !row.querySelector('[name="sku"]').value);
+      if (emptyRow) {
+        emptyRow.querySelector('[name="sku"]').value = suggestion.sku;
+        emptyRow.querySelector('[name="quantity"]').value = String(suggestion.suggested_quantity);
+      } else {
+        addOrderItemRow(container, suggestion.sku, suggestion.suggested_quantity);
+      }
+    }
+  }
+  updateMinimumStockSuggestion();
+  toast(`${suggestions.length} producto(s) agregado(s) para alcanzar el stock mínimo.`);
 }
 
 function consolidatedOrderDestinations() {
@@ -588,7 +659,11 @@ function populateSelects() {
     destinationValue,
   );
   renderPackageOrderSummary(destinationSelect.value);
-  document.querySelectorAll("#order-items [name='sku'], #package-items .entry-row select").forEach((select) => {
+  document.querySelectorAll("#order-items [name='sku']").forEach((select) => {
+    const current = select.value;
+    setOptions(select, productOptions(), "Elegir producto", current);
+  });
+  document.querySelectorAll("#package-items .entry-row select").forEach((select) => {
     const current = select.value;
     setOptions(select, productOptions(), null, current);
   });
@@ -655,6 +730,7 @@ function renderInventory() {
   const filter = document.querySelector("#stock-filter").value;
   const rows = state.data.stock.filter((item) => !filter || item.location_code === filter);
   document.querySelector("#stock-table").innerHTML = rows.map((item) => `<tr><td>${escapeHtml(locationName(item.location_code))}</td><td>${escapeHtml(item.name)}</td><td class="${item.quantity <= item.minimum_stock ? "stock-low" : ""}">${item.quantity}</td><td>${item.minimum_stock}</td><td>${money(item.quantity * item.cost_cents)}</td></tr>`).join("") || emptyRow(5, "No hay existencias para mostrar.");
+  updateMinimumStockSuggestion();
   document.querySelector("#orders-table").innerHTML = state.data.orders.map((order) => `<tr><td><strong>${escapeHtml(order.batch_code || order.code)}</strong><br><small>${escapeHtml(order.code)}</small></td><td>${escapeHtml(locationName(order.origin_code))}</td><td>${escapeHtml(locationName(order.destination_code))}</td><td>${order.lines.map((line) => `${escapeHtml(line.name || productName(line.sku))} × ${line.quantity}`).join(", ")}</td><td><span class="status-pill" data-status="${escapeHtml(order.status)}">${escapeHtml(order.status)}</span></td><td>${shortDate.format(new Date(order.created_at))}</td></tr>`).join("") || emptyRow(6, "Todavía no hay órdenes de reposición.");
   renderInventoryCounts();
 }
@@ -667,7 +743,7 @@ function renderPurchases() {
 
 function renderInventoryCounts() {
   const counts = state.data.inventory_counts.filter((item) => item.status === "Abierto");
-  document.querySelector("#inventory-counts").innerHTML = counts.map((count) => `<form class="count-card" data-count-id="${count.id}"><div class="count-heading"><div><strong>${escapeHtml(count.code)}</strong><small>${escapeHtml(locationName(count.location_code))} · conteo abierto</small></div><button class="button button-dark" type="submit">Conciliar y cerrar</button></div><div class="table-wrap"><table><thead><tr><th>PRODUCTO</th><th>SISTEMA</th><th>CONTEO FÍSICO</th></tr></thead><tbody>${count.lines.map((line) => `<tr><td>${escapeHtml(line.name)}</td><td>${line.expected_quantity}</td><td class="count-input-cell"><input type="number" min="0" step="1" name="quantity:${escapeHtml(line.sku)}" value="${line.counted_quantity ?? ""}" required aria-label="Conteo de ${escapeHtml(line.name)}"></td></tr>`).join("")}</tbody></table></div></form>`).join("") || '<p class="empty-cell">No hay conteos abiertos. Inicia uno para registrar existencias físicas.</p>';
+  document.querySelector("#inventory-counts").innerHTML = counts.map((count) => `<form class="count-card" data-count-id="${count.id}"><div class="count-heading"><div><strong>${escapeHtml(count.code)}</strong><small>${escapeHtml(locationName(count.location_code))} · conteo abierto</small></div><button class="button button-dark" type="submit">Conciliar y cerrar</button></div><p class="count-help">Ingresa el conteo físico solo de los productos que quieras conciliar. Los campos vacíos conservarán el stock actual.</p><div class="table-wrap"><table><thead><tr><th>PRODUCTO</th><th>SISTEMA</th><th>CONTEO FÍSICO</th></tr></thead><tbody>${count.lines.map((line) => `<tr><td>${escapeHtml(line.name)}</td><td>${line.expected_quantity}</td><td class="count-input-cell"><input type="number" min="0" step="1" name="quantity:${escapeHtml(line.sku)}" value="${line.counted_quantity ?? ""}" aria-label="Conteo de ${escapeHtml(line.name)}"></td></tr>`).join("")}</tbody></table></div></form>`).join("") || '<p class="empty-cell">No hay conteos abiertos. Inicia uno para registrar existencias físicas.</p>';
   document.querySelector("#inventory-count-history").innerHTML = state.data.inventory_counts.map((count) => `<tr><td>${escapeHtml(count.code)}</td><td>${escapeHtml(locationName(count.location_code))}</td><td>${escapeHtml(count.status)}</td><td>${dateTime.format(new Date(count.created_at))}</td></tr>`).join("") || emptyRow(4, "Todavía no hay conteos registrados.");
 }
 
@@ -726,8 +802,44 @@ function renderPackages() {
     <div class="package-destination"><strong>${escapeHtml(item.destination_name)}</strong><small>Precinto ${escapeHtml(item.seal || "Pendiente")}</small></div>
     <div><span class="status-pill" data-status="${escapeHtml(item.status)}">${escapeHtml(item.status)}</span><div class="package-lines">${item.lines.map((line) => `${escapeHtml(line.name || productName(line.sku))} × ${line.quantity}`).join(" · ")}</div></div>
     <div class="package-actions">${packageActionButtons(item)}</div>
-    <details class="events-detail"><summary>Referencias y eventos · ${item.events.length} eventos</summary><p><strong>Bulto:</strong> ${escapeHtml(item.code)} · <strong>Remito:</strong> ${escapeHtml(item.dispatch_note)} · <strong>Órdenes:</strong> ${escapeHtml(item.orders?.map((order) => order.code).join(", ") || item.order_code)}</p><ol>${item.events.map((event) => `<li><strong>${escapeHtml(event.state)}</strong> · ${escapeHtml(event.detail)} · ${dateTime.format(new Date(event.occurred_at))}</li>`).join("")}</ol></details>
+    ${packageTimeline(item)}
+    <details class="events-detail"><summary>Referencias del bulto</summary><p><strong>Bulto:</strong> ${escapeHtml(item.code)} · <strong>Remito:</strong> ${escapeHtml(item.dispatch_note)} · <strong>Órdenes:</strong> ${escapeHtml(item.orders?.map((order) => order.code).join(", ") || item.order_code)}</p></details>
   </article>`).join("") || '<p class="empty-cell">No hay bultos para este filtro.</p>';
+}
+
+function renderRejectedPackages() {
+  const packages = state.data.packages.filter((item) => item.status === "Rechazado");
+  document.querySelector("#rejected-packages-list").innerHTML = packages.map((item) => {
+    const reason = item.events.filter((event) => event.state === "Rechazado").at(-1)?.detail || "Rechazado por el local.";
+    const lines = item.lines.map((line) => `<li><span>${escapeHtml(line.name || productName(line.sku))}</span><strong>${line.quantity} u.</strong></li>`).join("");
+    const resolution = item.disposition === "stock"
+      ? '<span class="rejected-resolution rejected-resolution-stock">Devuelto al stock del CD</span>'
+      : item.disposition === "discard"
+        ? '<span class="rejected-resolution rejected-resolution-discard">Descartado · merma registrada</span>'
+        : `<div class="rejected-package-actions"><button class="small-action rejected-stock-action" data-rejected-disposition="stock" data-package-code="${escapeHtml(item.code)}" type="button">Devolver al stock</button><button class="small-action danger" data-rejected-disposition="discard" data-package-code="${escapeHtml(item.code)}" type="button">Descartar</button></div>`;
+    return `<article class="rejected-package-card">
+      <header class="rejected-package-heading"><div><strong>${escapeHtml(item.code)}</strong><small>Remito ${escapeHtml(item.dispatch_note)} · ${escapeHtml(item.destination_name)}</small></div><span class="status-pill" data-status="Rechazado">Rechazado</span></header>
+      <p class="rejected-package-reason">${escapeHtml(reason)}</p>
+      <ul class="rejected-package-lines">${lines}</ul>
+      <footer class="rejected-package-footer">${resolution}</footer>
+    </article>`;
+  }).join("") || '<p class="empty-cell">Todavía no hay bultos rechazados por los locales.</p>';
+}
+
+function packageTimeline(item) {
+  const steps = item.status === "Rechazado"
+    ? ["Preparado", "Precintado", "En tránsito", "Recibido", "Rechazado"]
+    : ["Preparado", "Precintado", "En tránsito", "Recibido", "Verificado"];
+  const currentIndex = steps.indexOf(item.status);
+  const eventsByState = new Map(item.events.map((event) => [event.state, event]));
+  return `<ol class="package-timeline" aria-label="Historial de estados del bulto">${steps.map((step, index) => {
+    const event = eventsByState.get(step);
+    const isCurrent = index === currentIndex;
+    const className = step === "Rechazado" && isCurrent
+      ? "timeline-step timeline-rejected"
+      : `timeline-step ${index < currentIndex ? "timeline-completed" : isCurrent ? "timeline-current" : "timeline-pending"}`;
+    return `<li class="${className}"><strong>${escapeHtml(step)}</strong>${event ? `<p>${escapeHtml(event.detail)}</p><time datetime="${escapeHtml(event.occurred_at)}">${dateTime.format(new Date(event.occurred_at))}</time>` : ""}</li>`;
+  }).join("")}</ol>`;
 }
 
 function renderUsers() {
@@ -802,6 +914,7 @@ function renderAll() {
   renderCatalog();
   renderInventory();
   renderPackages();
+  renderRejectedPackages();
   renderSales();
   renderPurchases();
   renderUsers();
@@ -830,14 +943,7 @@ function navigate(view) {
   const requested = document.querySelector(`.nav-item[data-view="${view}"]`);
   if (!requested || requested.hidden) view = "inicio";
   state.currentView = view;
-  const pageView = view === "mermas" ? "reportes" : view;
-  document.querySelectorAll(".page-view").forEach((element) => element.classList.toggle("active", element.id === `view-${pageView}`));
-  const reportPage = document.querySelector("#view-reportes");
-  reportPage.dataset.focus = view === "mermas" ? "mermas" : "";
-  document.querySelector("#report-title").textContent = view === "mermas" ? "Mermas y rechazos" : "Reportes operativos";
-  document.querySelector("#report-description").textContent = view === "mermas"
-    ? "Consulta mermas registradas, rechazos y tránsito logístico."
-    : "Ingresos netos, márgenes, existencias, tránsito y movimientos.";
+  document.querySelectorAll(".page-view").forEach((element) => element.classList.toggle("active", element.id === `view-${view}`));
   document.querySelectorAll(".nav-item").forEach((element) => {
     const active = element.dataset.view === view;
     element.classList.toggle("active", active);
@@ -846,7 +952,7 @@ function navigate(view) {
   });
   const active = document.querySelector(`.nav-item[data-view="${view}"]`);
   document.querySelector("#breadcrumb-current").textContent = active?.textContent.replace(/^\d+/, "").trim().toUpperCase() || view.toUpperCase();
-  if (view === "reportes" || view === "mermas") loadReports();
+  if (view === "reportes") loadReports();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -897,6 +1003,164 @@ function renderDailySalesChart(sales, start, end) {
   container.innerHTML = `<svg viewBox="0 0 800 238" preserveAspectRatio="none" aria-hidden="true">${ticks}<polyline points="${points}" class="chart-line"/>${markers}${labels}</svg>`;
 }
 
+function renderPaymentMethodChart(sales) {
+  const container = document.querySelector("#payment-method-chart");
+  const totals = new Map();
+  sales.forEach((row) => totals.set(row.payment_method, (totals.get(row.payment_method) || 0) + row.net_cents));
+  const rows = [...totals].map(([method, cents]) => ({ method, cents })).sort((a, b) => b.cents - a.cents);
+  if (!rows.length) {
+    container.innerHTML = '<p class="chart-empty">Sin ventas en este período.</p>';
+    return;
+  }
+  const max = Math.max(1, ...rows.map((row) => Math.abs(row.cents)));
+  const center = 410;
+  const scale = 275 / max;
+  const height = rows.length * 42 + 16;
+  const bars = rows.map((row, index) => {
+    const y = index * 42 + 7;
+    const width = Math.max(1, Math.abs(row.cents) * scale);
+    const x = row.cents < 0 ? center - width : center;
+    const valueX = row.cents < 0 ? x - 9 : x + width + 9;
+    const anchor = row.cents < 0 ? "end" : "start";
+    const amount = money(row.cents);
+    return `<text x="8" y="${y + 17}">${escapeHtml(row.method)}</text><rect x="${x}" y="${y}" width="${width}" height="25" rx="4" class="${row.cents < 0 ? "chart-bar-negative" : "chart-bar"}"><title>${escapeHtml(row.method)}: ${escapeHtml(amount)}</title></rect><text x="${valueX}" y="${y + 17}" text-anchor="${anchor}">${escapeHtml(amount)}</text>`;
+  }).join("");
+  container.innerHTML = `<svg viewBox="0 0 800 ${height}" role="img" aria-label="Ventas netas por medio de pago">${bars}<line x1="${center}" y1="0" x2="${center}" y2="${height}" class="chart-baseline"/></svg>`;
+}
+
+function renderTopProductsChart(products) {
+  const container = document.querySelector("#top-products-chart");
+  const rows = products.slice(0, 10);
+  if (!rows.length) {
+    container.innerHTML = '<p class="chart-empty">Sin ventas en este período.</p>';
+    return;
+  }
+  const max = Math.max(1, ...rows.map((row) => row.net_units));
+  const height = rows.length * 46 + 10;
+  const bars = rows.map((row, index) => {
+    const y = index * 46 + 6;
+    const width = Math.max(1, row.net_units / max * 260);
+    const name = row.name.length > 28 ? `${row.name.slice(0, 27)}…` : row.name;
+    return `<text x="8" y="${y + 17}"><title>${escapeHtml(row.name)}</title>${escapeHtml(name)}</text><rect x="230" y="${y}" width="${width}" height="26" rx="4" class="chart-bar"><title>${row.net_units} unidades</title></rect><text x="505" y="${y + 17}">${row.net_units} u.</text><text x="585" y="${y + 17}">Margen ${escapeHtml(money(row.margin_cents))}</text>`;
+  }).join("");
+  container.innerHTML = `<svg viewBox="0 0 800 ${height}" role="img" aria-label="Diez productos más vendidos y margen">${bars}</svg>`;
+}
+
+function renderCategorySalesChart(categories) {
+  const container = document.querySelector("#category-sales-chart");
+  if (!categories.length) {
+    container.innerHTML = '<p class="chart-empty">Sin productos vendidos en este período.</p>';
+    return;
+  }
+  const max = Math.max(1, ...categories.map((row) => row.net_units));
+  const barLeft = 210;
+  const maxBarWidth = 340;
+  const unitsX = 570;
+  const revenueX = 655;
+  const rowHeight = 52;
+  const top = 32;
+  const height = categories.length * rowHeight + top + 8;
+  const bars = categories.map((row, index) => {
+    const y = top + index * rowHeight;
+    const width = Math.max(2, row.net_units / max * maxBarWidth);
+    const name = row.category.length > 25 ? `${row.category.slice(0, 24)}…` : row.category;
+    const revenue = money(row.net_revenue_cents);
+    const details = `${row.net_units} unidades · ventas netas ${revenue}`;
+    return `<text x="8" y="${y + 20}"><title>${escapeHtml(row.category)}</title>${escapeHtml(name)}</text><rect x="${barLeft}" y="${y}" width="${width}" height="30" rx="5" class="chart-bar"><title>${escapeHtml(details)}</title></rect><text x="${unitsX}" y="${y + 20}"><title>Unidades vendidas netas</title>${row.net_units} u.</text><text x="${revenueX}" y="${y + 20}"><title>Ventas netas</title>${escapeHtml(revenue)}</text>`;
+  }).join("");
+  container.innerHTML = `<svg viewBox="0 0 800 ${height}" role="img" aria-label="Productos vendidos y venta neta por categoría"><text x="${unitsX}" y="18" class="chart-heading">UNIDADES</text><text x="${revenueX}" y="18" class="chart-heading">VENTA NETA</text>${bars}</svg>`;
+}
+
+function renderInventoryMovementsChart(movements) {
+  const container = document.querySelector("#inventory-movements-chart");
+  const totals = new Map();
+  movements.forEach((row) => {
+    const day = totals.get(row.movement_date) || { incoming: 0, outgoing: 0 };
+    if (row.quantity_delta > 0) day.incoming += row.quantity_delta;
+    else day.outgoing += Math.abs(row.quantity_delta);
+    totals.set(row.movement_date, day);
+  });
+  const dailyRows = [...totals].sort(([a], [b]) => a.localeCompare(b));
+  if (!dailyRows.length) {
+    container.innerHTML = '<p class="chart-empty">Sin movimientos de inventario en este período.</p>';
+    return;
+  }
+  const aggregateByMonth = dailyRows.length > 45;
+  const chartTotals = aggregateByMonth ? new Map() : totals;
+  if (aggregateByMonth) {
+    dailyRows.forEach(([date, day]) => {
+      const month = date.slice(0, 7);
+      const total = chartTotals.get(month) || { incoming: 0, outgoing: 0 };
+      total.incoming += day.incoming;
+      total.outgoing += day.outgoing;
+      chartTotals.set(month, total);
+    });
+  }
+  const rows = [...chartTotals].sort(([a], [b]) => a.localeCompare(b));
+  const max = Math.max(1, ...rows.map(([, day]) => Math.max(day.incoming, day.outgoing)));
+  const left = 62;
+  const width = 720;
+  const baseline = 112;
+  const upHeight = 82;
+  const downHeight = 82;
+  const slot = width / rows.length;
+  const barWidth = Math.max(3, Math.min(24, slot * 0.58));
+  const bars = rows.map(([date, day], index) => {
+    const x = left + (index + 0.5) * slot - barWidth / 2;
+    const incomingHeight = day.incoming / max * upHeight;
+    const outgoingHeight = day.outgoing / max * downHeight;
+    const showLabel = rows.length <= 10 || index === 0 || index === rows.length - 1 || index % Math.ceil(rows.length / 8) === 0;
+    const incoming = `<rect x="${x}" y="${baseline - incomingHeight}" width="${barWidth}" height="${incomingHeight}" class="chart-bar"><title>${escapeHtml(date)}: entrada ${day.incoming}</title></rect>`;
+    const outgoing = `<rect x="${x}" y="${baseline}" width="${barWidth}" height="${outgoingHeight}" class="chart-bar-negative"><title>${escapeHtml(date)}: salida ${day.outgoing}</title></rect>`;
+    const dateLabel = aggregateByMonth ? date.slice(2) : date.slice(5);
+    const label = showLabel ? `<text x="${x + barWidth / 2}" y="218" text-anchor="middle">${escapeHtml(dateLabel)}</text>` : "";
+    return `${incoming}${outgoing}${label}`;
+  }).join("");
+  const grid = [0, 1, 2].map((step) => {
+    const offset = step * upHeight / 2;
+    const value = Math.round(max * step / 2);
+    return `<line x1="${left}" y1="${baseline - offset}" x2="${left + width}" y2="${baseline - offset}" class="chart-gridline"/><text x="${left - 8}" y="${baseline - offset + 3}" text-anchor="end">${value}</text><line x1="${left}" y1="${baseline + offset}" x2="${left + width}" y2="${baseline + offset}" class="chart-gridline"/><text x="${left - 8}" y="${baseline + offset + 3}" text-anchor="end">${step === 0 ? "" : value}</text>`;
+  }).join("");
+  const periodLabel = aggregateByMonth ? "por mes" : "por día";
+  container.innerHTML = `<div class="report-chart-key"><span><i></i>Entradas</span><span><i class="key-negative"></i>Salidas</span><span>Total ${periodLabel}</span></div><svg viewBox="0 0 800 238" role="img" aria-label="Entradas sobre cero y salidas bajo cero ${periodLabel}">${grid}${bars}<line x1="${left}" y1="${baseline}" x2="${left + width}" y2="${baseline}" class="chart-baseline"/></svg>`;
+}
+
+function renderPackageStatusChart(packageCounts) {
+  const container = document.querySelector("#package-status-chart");
+  const destinations = new Map();
+  packageCounts.forEach((row) => {
+    const counts = destinations.get(row.destination) || { verified: 0, rejected: 0 };
+    if (row.status === "Verificado") counts.verified = row.count;
+    if (row.status === "Rechazado") counts.rejected = row.count;
+    destinations.set(row.destination, counts);
+  });
+  const allRows = [...destinations].map(([destination, counts]) => ({ destination, ...counts }))
+    .sort((a, b) => (b.verified + b.rejected) - (a.verified + a.rejected));
+  if (!allRows.length) {
+    container.innerHTML = '<p class="chart-empty">Sin bultos recibidos en este período.</p>';
+    return;
+  }
+  const rows = allRows.slice(0, 5);
+  if (allRows.length > rows.length) {
+    const others = allRows.slice(rows.length).reduce(
+      (total, row) => ({ destination: null, verified: total.verified + row.verified, rejected: total.rejected + row.rejected }),
+      { destination: null, verified: 0, rejected: 0 },
+    );
+    rows.push(others);
+  }
+  const max = Math.max(1, ...rows.map((row) => row.verified + row.rejected));
+  const scale = 430 / max;
+  const height = rows.length * 44 + 42;
+  const bars = rows.map((row, index) => {
+    const y = index * 44 + 34;
+    const verifiedWidth = row.verified * scale;
+    const rejectedWidth = row.rejected * scale;
+    const destination = row.destination ? locationName(row.destination) : "Otros destinos";
+    return `<text x="8" y="${y + 17}">${escapeHtml(destination)}</text><rect x="205" y="${y}" width="${verifiedWidth}" height="26" rx="4" class="chart-bar-verified"><title>Verificados: ${row.verified}</title></rect><rect x="${205 + verifiedWidth}" y="${y}" width="${rejectedWidth}" height="26" rx="4" class="chart-bar-rejected"><title>Rechazados: ${row.rejected}</title></rect><text x="${213 + verifiedWidth + rejectedWidth}" y="${y + 17}">${row.verified} / ${row.rejected}</text>`;
+  }).join("");
+  container.innerHTML = `<div class="report-chart-key"><span><i></i>Verificados</span><span><i class="key-negative"></i>Rechazados</span><span>Verificados / rechazados</span></div><svg viewBox="0 0 800 ${height}" role="img" aria-label="Bultos verificados y rechazados por local destino">${bars}</svg>`;
+}
+
 async function loadReports(start, end) {
   const form = document.querySelector("#report-form");
   const values = start && end ? { start, end } : formObject(form);
@@ -905,13 +1169,18 @@ async function loadReports(start, end) {
     const query = new URLSearchParams({ start: values.start, end: values.end, location: values.location || "" });
     const report = await api(`/api/reports?${query}`);
     renderDailySalesChart(report.daily_sales, values.start, values.end);
+    renderPaymentMethodChart(report.sales);
     document.querySelector("#report-sales").innerHTML = report.sales.map((row) => `<tr><td>${escapeHtml(row.activity_date)}</td><td>${escapeHtml(locationName(row.location))}</td><td>${escapeHtml(row.payment_method)}</td><td>${money(row.net_cents)}</td></tr>`).join("") || emptyRow(4, "Sin ventas en este período.");
-    document.querySelector("#report-products").innerHTML = report.best_sellers.map((row) => `<tr><td>${escapeHtml(row.name)}</td><td>${row.net_units}</td><td>${money(row.net_revenue_cents)}</td><td>${money(row.margin_cents)}</td></tr>`).join("") || emptyRow(4, "Sin ventas en este período.");
-    document.querySelector("#report-inventory").innerHTML = report.inventory.map((row) => `<tr><td>${escapeHtml(locationName(row.location))}</td><td>${escapeHtml(row.name)}</td><td>${row.quantity}</td><td>${row.minimum_stock}</td><td>${money(row.valuation_cents)}</td><td>${row.at_minimum ? '<span class="status-pill" data-status="Rechazado">Reponer</span>' : '<span class="status-pill" data-status="Verificado">Normal</span>'}</td></tr>`).join("") || emptyRow(6, "No hay locales o productos.");
+    renderTopProductsChart(report.best_sellers);
+    const topProducts = report.best_sellers.slice(0, 10);
+    document.querySelector("#report-products").innerHTML = topProducts.map((row) => `<tr><td>${escapeHtml(row.name)}</td><td>${row.net_units}</td><td>${money(row.net_revenue_cents)}</td><td>${money(row.margin_cents)}</td></tr>`).join("") || emptyRow(4, "Sin ventas en este período.");
+    renderCategorySalesChart(report.category_sales);
     const logistics = report.logistics;
+    renderPackageStatusChart(logistics.package_counts);
     const average = logistics.average_transit_hours == null ? "—" : `${Number(logistics.average_transit_hours).toFixed(1)} h`;
     const wasteDetails = logistics.waste_movements.map((item) => `<p><b>${escapeHtml(item.waste_date)}</b> · ${escapeHtml(locationName(item.location))} · ${escapeHtml(productName(item.sku))} · ${item.waste_quantity} u. · ${money(item.valuation_cents)}${item.cost_is_estimated ? " (estimado)" : ""}</p>`).join("") || "<small>Sin mermas registradas en este período.</small>";
-    document.querySelector("#report-logistics").innerHTML = `<div class="logistic-stat"><strong>${logistics.rejected_count}</strong><small>Bultos rechazados</small></div><div class="logistic-stat"><strong>${logistics.verified_packages}</strong><small>Bultos verificados</small></div><div class="logistic-stat"><strong>${average}</strong><small>Tránsito promedio del período</small></div><div class="logistic-stat"><strong>${logistics.waste_quantity} u.</strong><small>Mermas · ${money(logistics.waste_valuation_cents)}</small></div><div class="rejection-list"><strong>Bultos rechazados</strong>${logistics.rejected_packages.map((item) => `<p><b>${escapeHtml(item.code)}</b> · ${escapeHtml(locationName(item.destination))} · ${escapeHtml(item.reason || "Rechazado")}</p>`).join("") || "<small>Sin rechazos registrados en este período.</small>"}<strong>Mermas registradas</strong>${wasteDetails}<small>Los bultos rechazados se informan aparte: su mercadería vuelve al CD y no se cuenta como merma.</small></div>`;
+    document.querySelector("#report-logistics").innerHTML = `<div class="logistic-stat"><strong>${logistics.rejected_count}</strong><small>Bultos rechazados</small></div><div class="logistic-stat"><strong>${logistics.verified_packages}</strong><small>Bultos verificados</small></div><div class="logistic-stat"><strong>${average}</strong><small>Tránsito promedio del período</small></div><div class="logistic-stat"><strong>${logistics.waste_quantity} u.</strong><small>Mermas · ${money(logistics.waste_valuation_cents)}</small></div><div class="rejection-list"><strong>Bultos rechazados</strong>${logistics.rejected_packages.map((item) => `<p><b>${escapeHtml(item.code)}</b> · ${escapeHtml(locationName(item.destination))} · ${escapeHtml(item.reason || "Rechazado")}</p>`).join("") || "<small>Sin rechazos registrados en este período.</small>"}<strong>Mermas registradas</strong>${wasteDetails}<small>Los bultos rechazados requieren una resolución en el apartado Mermas.</small></div>`;
+    renderInventoryMovementsChart(report.movements);
     document.querySelector("#report-movements").innerHTML = report.movements.map((row) => `<tr><td>${escapeHtml(row.movement_date)}</td><td>${escapeHtml(locationName(row.location))}</td><td>${escapeHtml(productName(row.sku))}</td><td>${escapeHtml(row.movement_type)}${row.cost_is_estimated ? "<br><small>Valorización estimada</small>" : ""}</td><td>${row.quantity_delta > 0 ? "+" : ""}${row.quantity_delta}</td><td>${money(row.valuation_delta_cents)}</td></tr>`).join("") || emptyRow(6, "Sin movimientos en este período.");
   } catch (error) {
     toast(error.message, true);
@@ -941,6 +1210,25 @@ async function handlePackageAction(button) {
     toast(typeof result.result === "string" ? result.result : `Bulto ${code}: ${result.result}`);
   } catch (error) {
     toast(error.message, true);
+  }
+}
+
+async function handleRejectedPackageDisposition(button) {
+  const { packageCode, rejectedDisposition: disposition } = button.dataset;
+  const action = disposition === "stock" ? "devolver al stock del CD" : "descartar y registrar como merma";
+  if (!window.confirm(`¿Confirmás ${action} del bulto ${packageCode}?`)) return;
+  button.disabled = true;
+  try {
+    const result = await api(`/api/packages/${encodeURIComponent(packageCode)}/disposition`, {
+      method: "POST",
+      body: JSON.stringify({ disposition }),
+    });
+    await refreshData();
+    toast(result.result);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -1372,8 +1660,11 @@ function bindForms() {
       const quantities = {};
       for (const [key, value] of Object.entries(values)) {
         if (key.startsWith("quantity:")) {
-          quantities[key.slice("quantity:".length)] = Number(value);
+          if (value !== "") quantities[key.slice("quantity:".length)] = Number(value);
         }
+      }
+      if (!Object.keys(quantities).length) {
+        throw new Error("Ingresa el conteo físico de al menos un producto para cerrar.");
       }
       await api(`/api/inventory-counts/${form.dataset.countId}/lines`, { method: "POST", body: JSON.stringify({ quantities }) });
       await api(`/api/inventory-counts/${form.dataset.countId}/close`, { method: "POST", body: "{}" });
@@ -1386,10 +1677,15 @@ function bindForms() {
     if (container.id === "order-items") addOrderItemRow(container);
     else addItemRow(container);
   }));
+  document.querySelector("#add-minimum-stock-items").addEventListener("click", addMinimumStockSuggestions);
   document.querySelector("[data-add-payment]").addEventListener("click", addPaymentRow);
   document.querySelector("#packages-list").addEventListener("click", (event) => {
     const button = event.target.closest("[data-package-action]");
     if (button) handlePackageAction(button);
+  });
+  document.querySelector("#rejected-packages-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-rejected-disposition]");
+    if (button) handleRejectedPackageDisposition(button);
   });
   document.querySelector("#sales-table").addEventListener("click", (event) => {
     const returnButton = event.target.closest("[data-return]");

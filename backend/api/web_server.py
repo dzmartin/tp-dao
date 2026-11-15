@@ -267,7 +267,7 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                 return True
             if path.startswith("/api/packages/"):
                 action = path.rsplit("/", 1)[-1]
-                if action in ("seal", "dispatch"):
+                if action in ("seal", "dispatch", "disposition"):
                     return True
                 return self._require_role(user, "LOCAL")
             self._deny(403, "El perfil Centro de Distribución no tiene permiso para esta operación.")
@@ -377,10 +377,13 @@ class RetailWebHandler(BaseHTTPRequestHandler):
             )
         packages = self._all(
             """SELECT p.id,p.code,p.dispatch_note,p.seal,p.status,p.prepared_at,p.dispatched_at,p.received_at,
+                      rpd.disposition,
                       o.code AS order_code,o.id AS order_id,dst.code AS destination_code,
                       dst.name AS destination_name
                FROM packages p JOIN replenishment_orders o ON o.id=p.order_id
-               JOIN locations dst ON dst.id=o.destination_id ORDER BY p.id DESC"""
+               JOIN locations dst ON dst.id=o.destination_id
+               LEFT JOIN rejected_package_dispositions rpd ON rpd.package_id=p.id
+               ORDER BY p.id DESC"""
         )
         for package in packages:
             package["lines"] = self._all(
@@ -578,6 +581,7 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                     "sales": self.application.reports.sales_by_period(start, end, location),
                     "daily_sales": self.application.reports.net_sales_by_day(start, end, location),
                     "best_sellers": self.application.reports.best_sellers_and_margin(start, end, location),
+                    "category_sales": self.application.reports.units_sold_by_category(start, end, location),
                     "inventory": self.application.reports.inventory_and_minimums(location),
                     "logistics": self.application.reports.logistics_performance(start, end, location),
                     "movements": self.application.reports.inventory_movements(start, end, location),
@@ -819,6 +823,13 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                 elif action == "verify":
                     service.verify_package(package_code)
                     result = "Bulto verificado y stock liberado."
+                elif action == "disposition":
+                    service.resolve_rejected_package(package_code, body["disposition"])
+                    result = (
+                        "Mercadería devuelta al stock del CD."
+                        if body["disposition"] == "stock"
+                        else "Mercadería descartada y registrada como merma."
+                    )
                 else:
                     self._json(404, {"error": "Acción logística desconocida."})
                     return

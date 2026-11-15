@@ -56,6 +56,66 @@ class RetailWorkflowTests(unittest.TestCase):
         with self.assertRaises(BusinessRuleError):
             self.service.sell("L01", {"SKU-1": 1}, {"efectivo": 10})
 
+    def test_rejected_package_can_be_returned_to_cd_stock_only_once(self):
+        self._package()
+        cd_stock = self.repository.one(
+            "SELECT quantity FROM stock WHERE location_id=? AND product_id=1", (self.cd,)
+        )["quantity"]
+        self.service.receive("B-1", seal_intact=False)
+        self.assertEqual(
+            self.repository.one(
+                "SELECT quantity FROM stock WHERE location_id=? AND product_id=1", (self.cd,)
+            )["quantity"],
+            cd_stock,
+        )
+
+        self.service.resolve_rejected_package("B-1", "stock")
+        self.assertEqual(
+            self.repository.one(
+                "SELECT quantity FROM stock WHERE location_id=? AND product_id=1", (self.cd,)
+            )["quantity"],
+            cd_stock + 5,
+        )
+        movement = self.repository.one(
+            "SELECT quantity_delta,movement_type FROM inventory_movements WHERE reference='B-1' ORDER BY id DESC"
+        )
+        self.assertEqual(
+            (movement["quantity_delta"], movement["movement_type"]),
+            (5, "devolución bulto rechazado"),
+        )
+        with self.assertRaises(BusinessRuleError):
+            self.service.resolve_rejected_package("B-1", "stock")
+        self.assertEqual(
+            self.repository.one(
+                "SELECT quantity FROM stock WHERE location_id=? AND product_id=1", (self.cd,)
+            )["quantity"],
+            cd_stock + 5,
+        )
+
+    def test_discarded_rejected_package_is_recorded_as_waste_without_restocking(self):
+        self._package()
+        cd_stock = self.repository.one(
+            "SELECT quantity FROM stock WHERE location_id=? AND product_id=1", (self.cd,)
+        )["quantity"]
+        self.service.receive("B-1", seal_intact=False)
+        self.service.resolve_rejected_package("B-1", "discard")
+
+        self.assertEqual(
+            self.repository.one(
+                "SELECT quantity FROM stock WHERE location_id=? AND product_id=1", (self.cd,)
+            )["quantity"],
+            cd_stock,
+        )
+        movement = self.repository.one(
+            "SELECT quantity_delta,waste_quantity,movement_type FROM inventory_movements WHERE reference='B-1' ORDER BY id DESC"
+        )
+        self.assertEqual(
+            (movement["quantity_delta"], movement["waste_quantity"], movement["movement_type"]),
+            (0, 5, "merma bulto rechazado"),
+        )
+        with self.assertRaises(BusinessRuleError):
+            self.service.resolve_rejected_package("B-1", "stock")
+
     def test_only_verified_package_becomes_sellable(self):
         self._package()
         self.assertEqual(self.service.receive("B-1", seal_intact=True), "Recibido")
@@ -81,6 +141,24 @@ class RetailWorkflowTests(unittest.TestCase):
         self.assertEqual(sum(row["net_cents"] for row in sales), 1000)
         margin = self.reports.best_sellers_and_margin("2000-01-01", "2999-12-31")[0]["margin_cents"]
         self.assertEqual(margin, 550)
+
+    def test_units_sold_by_category_uses_net_sales_and_location_filter(self):
+        self.service.create_product("SKU-2", "Bebida", "Bebidas", "2.00", "5.00", 1)
+        self._deliver("SKU-1", 3, "B-CAT-1")
+        self._deliver("SKU-2", 3, "B-CAT-2")
+        receipt = self.service.sell("L01", {"SKU-1": 2}, {"efectivo": 20})
+        self.service.sell("L01", {"SKU-2": 2}, {"efectivo": 10})
+        self.service.return_items(receipt, {"SKU-1": 1})
+
+        report = self.reports.units_sold_by_category("2000-01-01", "2999-12-31", "L01")
+        self.assertEqual(report, [
+            {"category": "Bebidas", "net_units": 2, "net_revenue_cents": 1000},
+            {"category": "Almacén", "net_units": 1, "net_revenue_cents": 1000},
+        ])
+        self.assertEqual(
+            self.reports.units_sold_by_category("2000-01-01", "2999-12-31", "CD"),
+            [],
+        )
 
     def test_cash_overpayment_records_only_the_amount_due_and_mixed_payment_change(self):
         self._package()
@@ -199,15 +277,31 @@ class RetailWorkflowTests(unittest.TestCase):
         self.assertEqual(line["unit_price_cents"], 1000)
 
     def test_physical_count_reconciles_stock_and_audits_delta(self):
+        self.service.create_product("SKU-2", "Otro producto", "Almacén", "2.00", "5.00", 1)
+        self._deliver("SKU-2", 3, "B-COUNT")
         count_id = self.service.open_inventory_count("L01")
         self.service.set_inventory_count(count_id, {"SKU-1": 4})
         self.service.close_inventory_count(count_id)
         self.assertEqual(self._stock(), 4)
+        other_stock = self.repository.one(
+            """SELECT s.quantity FROM stock s JOIN locations l ON l.id=s.location_id
+               JOIN products p ON p.id=s.product_id WHERE l.code='L01' AND p.sku='SKU-2'"""
+        )
+        self.assertEqual(other_stock["quantity"], 3)
         movement = self.repository.one(
             "SELECT quantity_delta,movement_type FROM inventory_movements WHERE reference=?",
             (str(count_id),),
         )
         self.assertEqual((movement["quantity_delta"], movement["movement_type"]), (4, "conciliación inventario físico"))
+
+    def test_physical_count_requires_at_least_one_counted_product(self):
+        count_id = self.service.open_inventory_count("L01")
+        with self.assertRaisesRegex(BusinessRuleError, "Cuenta al menos un producto"):
+            self.service.close_inventory_count(count_id)
+        status = self.repository.one(
+            "SELECT status FROM inventory_counts WHERE id=?", (count_id,)
+        )["status"]
+        self.assertEqual(status, "Abierto")
 
     def test_product_and_supplier_identifiers_are_unique(self):
         supplier_id = self.service.create_supplier("TAX-1", "Proveedor")
@@ -369,6 +463,10 @@ class RetailWorkflowTests(unittest.TestCase):
         report = self.reports.logistics_performance(today_iso, today_iso, "L01")
         self.assertEqual(report["rejected_count"], 1)
         self.assertEqual(report["verified_packages"], 1)
+        self.assertEqual(
+            {(row["destination"], row["status"]): row["count"] for row in report["package_counts"]},
+            {("L01", "Rechazado"): 1, ("L01", "Verificado"): 1},
+        )
         self.assertEqual(report["waste_quantity"], 1)
         self.assertEqual(report["waste_valuation_cents"], 450)
         self.assertEqual(report["waste_movements"][0]["cost_is_estimated"], 0)

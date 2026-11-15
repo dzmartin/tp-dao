@@ -79,6 +79,35 @@ class WebApiTests(unittest.TestCase):
         self.application.auth.create_user("admin", "clave-segura-admin", "ADMIN", None)
         self.login("admin", "clave-segura-admin")
 
+    def test_only_cd_can_resolve_rejected_packages(self):
+        self.initialize_accounts()
+        service = self.application.retail
+        service.create_product("SKU-REJECT", "Producto rechazado", "General", 4, 8, 0)
+        service.adjust_stock("CD", "SKU-REJECT", 3, "compra")
+        order_id = service.create_replenishment("L01", {"SKU-REJECT": 3})
+        service.pack(order_id, "B-REJECT", "R-REJECT", {"SKU-REJECT": 3})
+        service.seal_package("B-REJECT", "PREC-REJECT")
+        service.dispatch("B-REJECT")
+        service.receive("B-REJECT", seal_intact=False)
+
+        self.login("local01", "clave-segura-local")
+        status, _ = self.post(
+            "/api/packages/B-REJECT/disposition", {"disposition": "stock"}
+        )
+        self.assertEqual(status, 403)
+
+        self.login("centro", "clave-segura-centro")
+        status, result = self.post(
+            "/api/packages/B-REJECT/disposition", {"disposition": "stock"}
+        )
+        self.assertEqual(status, 201, result)
+        self.assertEqual(result["result"], "Mercadería devuelta al stock del CD.")
+        _, bootstrap = self.request("/api/bootstrap")
+        package = next(
+            item for item in json.loads(bootstrap)["packages"] if item["code"] == "B-REJECT"
+        )
+        self.assertEqual(package["disposition"], "stock")
+
     def login(self, username: str, password: str):
         status, result = self.post("/api/auth/login", {"username": username, "password": password})
         self.assertEqual(status, 200, result)
@@ -216,6 +245,10 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(report_status, 200)
         report_data = json.loads(reports)
         self.assertEqual(report_data["best_sellers"][0]["net_units"], 1)
+        self.assertEqual(
+            report_data["category_sales"],
+            [{"category": "General", "net_units": 1, "net_revenue_cents": 1000}],
+        )
         self.assertEqual(report_data["logistics"]["verified_packages"], 1)
         self.assertEqual(sum(row["net_cents"] for row in report_data["daily_sales"]), 1000)
 

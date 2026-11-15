@@ -429,9 +429,10 @@ class RetailService:
                 "SELECT cl.* FROM inventory_count_lines cl WHERE cl.count_id=?",
                 (count_id,),
             )
-            if not lines or any(line["counted_quantity"] is None for line in lines):
-                raise BusinessRuleError("Completa el conteo de todos los productos antes de cerrar.")
-            for line in lines:
+            counted_lines = [line for line in lines if line["counted_quantity"] is not None]
+            if not counted_lines:
+                raise BusinessRuleError("Cuenta al menos un producto antes de cerrar.")
+            for line in counted_lines:
                 delta = line["counted_quantity"] - line["expected_quantity"]
                 if delta:
                     self.repository.execute(
@@ -798,19 +799,56 @@ class RetailService:
                        WHERE id IN (SELECT order_id FROM package_orders WHERE package_id=?)""",
                     (package["id"],),
                 )
-                order = self.repository.one("SELECT origin_id FROM replenishment_orders WHERE id=?", (package["order_id"],))
-                for line in self.repository.all("SELECT * FROM package_lines WHERE package_id=?", (package["id"],)):
+                return "Rechazado"
+            return "Recibido"
+
+    def resolve_rejected_package(self, package_code: str, disposition: str) -> None:
+        if disposition not in ("stock", "discard"):
+            raise BusinessRuleError("La resolución debe ser devolver al stock o descartar.")
+        with self.repository.transaction():
+            package = _require(
+                self.repository.one(
+                    """SELECT p.id,p.status,o.origin_id FROM packages p
+                       JOIN replenishment_orders o ON o.id=p.order_id WHERE p.code=?""",
+                    (package_code,),
+                ),
+                "Bulto inexistente.",
+            )
+            if package["status"] != "Rechazado":
+                raise BusinessRuleError("Solo se pueden resolver bultos rechazados por el local.")
+            if self.repository.one(
+                "SELECT package_id FROM rejected_package_dispositions WHERE package_id=?",
+                (package["id"],),
+            ):
+                raise BusinessRuleError("Este bulto rechazado ya fue resuelto.")
+            lines = self.repository.all(
+                "SELECT product_id,quantity FROM package_lines WHERE package_id=?",
+                (package["id"],),
+            )
+            if not lines:
+                raise BusinessRuleError("El bulto rechazado no tiene productos para resolver.")
+            self.repository.execute(
+                """INSERT INTO rejected_package_dispositions(package_id,disposition,resolved_at)
+                   VALUES(?,?,?)""",
+                (package["id"], disposition, _now()),
+            )
+            for line in lines:
+                if disposition == "stock":
                     self.repository.execute(
                         """INSERT INTO stock(location_id,product_id,quantity) VALUES(?,?,?)
                            ON CONFLICT(location_id,product_id) DO UPDATE SET quantity=quantity+excluded.quantity""",
-                        (order["origin_id"], line["product_id"], line["quantity"]),
+                        (package["origin_id"], line["product_id"], line["quantity"]),
                     )
                     self._record_inventory_movement(
-                        order["origin_id"], line["product_id"], line["quantity"],
-                        "despacho rechazado", package_code,
+                        package["origin_id"], line["product_id"], line["quantity"],
+                        "devolución bulto rechazado", package_code,
                     )
-                return "Rechazado"
-            return "Recibido"
+                else:
+                    self._record_inventory_movement(
+                        package["origin_id"], line["product_id"], 0,
+                        "merma bulto rechazado", package_code,
+                        waste_quantity=line["quantity"],
+                    )
 
     def verify_package(self, package_code: str) -> None:
         with self.repository.transaction():

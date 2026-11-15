@@ -53,6 +53,25 @@ class ReportService:
         )
         return [dict(row) for row in rows]
 
+    def units_sold_by_category(
+        self, start_date: str, end_date: str, location_code: str | None = None
+    ) -> list[dict]:
+        rows = self.repository.all(
+            """SELECT COALESCE(c.name,p.category,'Sin categoría') AS category,
+                      SUM(sl.quantity-sl.returned_quantity) AS net_units,
+                      SUM(sl.unit_price_cents*(sl.quantity-sl.returned_quantity)) AS net_revenue_cents
+               FROM sale_lines sl JOIN sales s ON s.id=sl.sale_id
+               JOIN products p ON p.id=sl.product_id
+               LEFT JOIN categories c ON c.id=p.category_id
+               JOIN locations l ON l.id=s.location_id
+               WHERE substr(s.sold_at,1,10) BETWEEN ? AND ? AND (? IS NULL OR l.code=?)
+               GROUP BY COALESCE(c.name,p.category,'Sin categoría')
+               HAVING net_units > 0
+               ORDER BY net_units DESC, category""",
+            (start_date, end_date, location_code, location_code),
+        )
+        return [dict(row) for row in rows]
+
     def inventory_and_minimums(self, location_code: str | None = None) -> list[dict]:
         rows = self.repository.all(
             """SELECT l.code AS location, p.sku, p.name, COALESCE(s.quantity,0) AS quantity,
@@ -89,7 +108,18 @@ class ReportService:
                FROM packages p JOIN replenishment_orders o ON o.id=p.order_id
                JOIN locations l ON l.id=o.destination_id
                WHERE p.status='Verificado' AND p.dispatched_at IS NOT NULL AND p.received_at IS NOT NULL
-                 AND substr(p.dispatched_at,1,10) BETWEEN ? AND ? AND (? IS NULL OR l.code=?)""",
+                 AND substr(p.received_at,1,10) BETWEEN ? AND ? AND (? IS NULL OR l.code=?)""",
+            (start_date, end_date, location_code, location_code),
+        )
+        package_counts = self.repository.all(
+            """SELECT l.code AS destination,p.status,COUNT(*) AS count
+               FROM packages p JOIN replenishment_orders o ON o.id=p.order_id
+               JOIN locations l ON l.id=o.destination_id
+               WHERE p.status IN ('Verificado','Rechazado')
+                 AND substr(p.received_at,1,10) BETWEEN ? AND ?
+                 AND (? IS NULL OR l.code=?)
+               GROUP BY l.code,p.status
+               ORDER BY l.code,p.status""",
             (start_date, end_date, location_code, location_code),
         )
         waste = self.repository.all(
@@ -108,6 +138,7 @@ class ReportService:
             "rejected_count": len(rejected),
             "rejected_packages": [dict(row) for row in rejected],
             "verified_packages": transit["verified_packages"],
+            "package_counts": [dict(row) for row in package_counts],
             "average_transit_hours": transit["average_transit_hours"],
             "waste_count": len(waste),
             "waste_quantity": sum(row["waste_quantity"] for row in waste),

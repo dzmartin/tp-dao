@@ -146,7 +146,7 @@
             <button class="button button-dark" type="submit">Crear producto</button>
           </form>
         </div>
-        <section class="panel section-panel"><div class="panel-heading"><div><p class="eyebrow">REFERENCIAS</p><h2>Productos registrados</h2></div><label class="search-control"><span>Buscar</span><input id="product-search" type="search" placeholder="Nombre del producto"></label>
+        <section class="panel section-panel"><div class="panel-heading"><div><p class="eyebrow">REFERENCIAS</p><h2>Productos registrados</h2></div><label class="search-control"><span>Buscar</span><input id="product-search" type="search" placeholder="Nombre del producto"></label></div>
           <div class="table-wrap"><table><thead><tr><th>PRODUCTO</th><th>CATEGORÍA</th><th>PROVEEDOR</th><th>COSTO</th><th>PRECIO</th><th>MÍNIMO</th><th>ACCIONES</th></tr></thead><tbody id="products-table"></tbody></table></div>
         </section>
       </section>
@@ -209,6 +209,7 @@
           </form>
           <form class="panel form-panel" id="order-form" data-roles="LOCAL"><div class="panel-heading"><div><p class="eyebrow">SOLICITUD AL CD</p><h2>Solicitar reposición</h2></div></div>
             <p class="form-help">La solicitud se enviará al Centro de Distribución para tu sucursal.</p>
+            <div class="minimum-stock-suggestion"><p class="form-help">Puedes agregar automáticamente los productos que están por debajo del mínimo.</p><button class="small-action" id="add-minimum-stock-items" type="button">Agregar sugerencias de stock mínimo</button></div>
             <div class="items-heading"><span>PRODUCTOS SOLICITADOS</span><button class="text-button" type="button" data-add-row="order-items">+ Agregar línea</button></div>
             <div class="item-rows" id="order-items"></div><button class="button button-dark" type="submit">Enviar solicitud</button>
           </form>
@@ -237,6 +238,14 @@
         <section class="panel section-panel"><div class="panel-heading"><div><p class="eyebrow">TRAZABILIDAD</p><h2>Bultos y acciones</h2></div><select id="package-filter" class="compact-select"><option value="">Todos los estados</option><option>Preparado</option><option>Precintado</option><option>En tránsito</option><option>Recibido</option><option>Verificado</option><option>Rechazado</option></select></div><div class="package-list" id="packages-list"></div></section>
       </section>
 
+      <section class="page-view" id="view-mermas" data-roles="CD">
+        <div class="page-heading"><div><p class="eyebrow">CONTROL DE MERCADERÍA</p><h1>Mermas y bultos rechazados</h1><p class="lede">Resuelve los bultos rechazados por los locales: devuelve los productos al stock del CD o descártalos como merma.</p></div></div>
+        <section class="panel section-panel rejected-packages-panel">
+          <div class="panel-heading"><div><p class="eyebrow">CONTROL DE BULTOS</p><h2>Bultos rechazados por los locales</h2></div></div>
+          <div class="rejected-package-list" id="rejected-packages-list"></div>
+        </section>
+      </section>
+
       <section class="page-view" id="view-ventas" data-roles="LOCAL">
         <div class="page-heading"><div><p class="eyebrow">PUNTO DE VENTA</p><h1>Ventas y devoluciones</h1><p class="lede">Solo se venden unidades disponibles y verificadas en el local.</p></div></div>
         <div class="sales-layout">
@@ -257,11 +266,11 @@
         <form class="panel report-controls" id="report-form"><label>Desde<input name="start" type="date" required></label><label>Hasta<input name="end" type="date" required></label><label>Local<select name="location"><option value="">Todos los locales</option></select></label><button class="button button-dark" type="submit">Generar reportes</button></form>
         <div class="report-grid">
           <section class="panel report-panel report-wide" id="daily-sales-panel"><div class="panel-heading"><div><p class="eyebrow">VENTA NETA</p><h2>Ventas netas por día</h2></div></div><div class="daily-chart" id="daily-sales-chart" role="img" aria-label="Gráfico de ventas netas por día"></div></section>
-          <section class="panel report-panel"><div class="panel-heading"><div><p class="eyebrow">RENDIMIENTO COMERCIAL</p><h2>Ventas por medio de pago</h2></div></div><div class="table-wrap"><table><thead><tr><th>FECHA</th><th>LOCAL</th><th>MEDIO</th><th>NETO</th></tr></thead><tbody id="report-sales"></tbody></table></div></section>
-          <section class="panel report-panel"><div class="panel-heading"><div><p class="eyebrow">RENTABILIDAD</p><h2>Productos y margen estimado</h2></div></div><div class="table-wrap"><table><thead><tr><th>PRODUCTO</th><th>UNIDADES</th><th>VENTA NETA</th><th>MARGEN</th></tr></thead><tbody id="report-products"></tbody></table></div></section>
-          <section class="panel report-panel" id="report-logistics-panel"><div class="panel-heading"><div><p class="eyebrow">CONTROL LOGÍSTICO</p><h2>Rechazos, mermas y tránsito</h2></div></div><div class="logistics-summary" id="report-logistics"></div></section>
-          <section class="panel report-panel"><div class="panel-heading"><div><p class="eyebrow">VALUACIÓN</p><h2>Movimientos de inventario</h2></div></div><div class="table-wrap"><table><thead><tr><th>FECHA</th><th>LOCAL</th><th>PRODUCTO</th><th>MOVIMIENTO</th><th>UNIDADES</th><th>VALOR HISTÓRICO</th></tr></thead><tbody id="report-movements"></tbody></table></div><p class="report-note">El valor usa el costo registrado al momento del movimiento. Los movimientos anteriores a esta mejora se muestran como estimados con el costo actual.</p></section>
-          <section class="panel report-panel report-wide"><div class="panel-heading"><div><p class="eyebrow">DISPONIBILIDAD</p><h2>Existencias y mínimos por local</h2></div></div><div class="table-wrap"><table><thead><tr><th>LOCAL</th><th>PRODUCTO</th><th>EXISTENCIA</th><th>MÍNIMO</th><th>VALORIZACIÓN</th><th>ESTADO</th></tr></thead><tbody id="report-inventory"></tbody></table></div></section>
+          <section class="panel report-panel payment-report-panel"><div class="panel-heading"><div><p class="eyebrow">RENDIMIENTO COMERCIAL</p><h2>Ventas por medio de pago</h2></div></div><div class="report-chart" id="payment-method-chart" role="img" aria-label="Ventas netas agrupadas por medio de pago"></div><div class="table-wrap report-records payment-records"><table><thead><tr><th>FECHA</th><th>LOCAL</th><th>MEDIO</th><th>NETO</th></tr></thead><tbody id="report-sales"></tbody></table></div></section>
+          <section class="panel report-panel"><div class="panel-heading"><div><p class="eyebrow">RENTABILIDAD</p><h2>10 productos más vendidos</h2></div></div><div class="report-chart" id="top-products-chart" role="img" aria-label="Productos más vendidos con su margen estimado"></div><div class="table-wrap report-records"><table><thead><tr><th>PRODUCTO</th><th>UNIDADES</th><th>VENTA NETA</th><th>MARGEN</th></tr></thead><tbody id="report-products"></tbody></table></div></section>
+          <section class="panel report-panel" id="report-logistics-panel" data-roles="ADMIN,CD"><div class="panel-heading"><div><p class="eyebrow">CONTROL LOGÍSTICO</p><h2>Rechazos, mermas y tránsito</h2></div></div><div class="report-chart" id="package-status-chart" role="img" aria-label="Bultos verificados y rechazados por destino"></div><div class="logistics-summary" id="report-logistics"></div></section>
+          <section class="panel report-panel" id="report-category-sales-panel" data-roles="LOCAL"><div class="panel-heading"><div><p class="eyebrow">VENTAS POR CATEGORÍA</p><h2>Productos vendidos por categoría</h2></div></div><div class="report-chart" id="category-sales-chart" role="img" aria-label="Cantidad neta de productos vendidos por categoría"></div></section>
+          <section class="panel report-panel"><div class="panel-heading"><div><p class="eyebrow">VALUACIÓN</p><h2>Entradas y salidas de inventario</h2></div></div><div class="report-chart" id="inventory-movements-chart" role="img" aria-label="Entradas y salidas de inventario por día o mes"></div><div class="table-wrap movement-records" role="region" aria-label="Registros de movimientos de inventario" tabindex="0"><table><thead><tr><th>FECHA</th><th>LOCAL</th><th>PRODUCTO</th><th>MOVIMIENTO</th><th>UNIDADES</th><th>VALOR HISTÓRICO</th></tr></thead><tbody id="report-movements"></tbody></table></div><p class="report-note">El valor usa el costo registrado al momento del movimiento. Los movimientos anteriores a esta mejora se muestran como estimados con el costo actual.</p></section>
         </div>
       </section>
     </div>

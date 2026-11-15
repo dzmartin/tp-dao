@@ -149,6 +149,11 @@ CREATE TRIGGER IF NOT EXISTS package_events_no_update
 BEFORE UPDATE ON package_events BEGIN SELECT RAISE(ABORT, 'package history is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS package_events_no_delete
 BEFORE DELETE ON package_events BEGIN SELECT RAISE(ABORT, 'package history is immutable'); END;
+CREATE TABLE IF NOT EXISTS rejected_package_dispositions (
+    package_id INTEGER PRIMARY KEY REFERENCES packages(id),
+    disposition TEXT NOT NULL CHECK (disposition IN ('stock','discard')),
+    resolved_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sales (
     id INTEGER PRIMARY KEY,
     receipt TEXT NOT NULL UNIQUE,
@@ -219,7 +224,17 @@ class SQLiteRepository:
             Path(database_path).parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(str(database_path))
         self.connection.row_factory = sqlite3.Row
+        has_rejected_dispositions = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rejected_package_dispositions'"
+        ).fetchone() is not None
         self.connection.executescript(SCHEMA)
+        if not has_rejected_dispositions:
+            self.connection.execute(
+                """INSERT INTO rejected_package_dispositions(package_id,disposition,resolved_at)
+                   SELECT id,'stock',COALESCE(received_at,prepared_at)
+                   FROM packages WHERE status='Rechazado'"""
+            )
+            self.connection.commit()
         self._migrate_admin_role()
         self._migrate_package_orders()
         sale_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(sales)")}

@@ -9,6 +9,43 @@ from backend.servicios.retail_service import RetailService
 
 
 class AdminRoleMigrationTests(unittest.TestCase):
+    def test_existing_rejected_packages_are_marked_as_already_returned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "legacy-rejection.db"
+            repository = SQLiteRepository(database_path)
+            service = RetailService(repository)
+            cd_id = service.create_location("CD", "Centro", "CD")
+            service.create_location("L01", "Local", "LOCAL")
+            service.create_product("SKU-1", "Producto", "General", 4, 8, 0)
+            service.adjust_stock("CD", "SKU-1", 2, "compra")
+            order_id = service.create_replenishment("L01", {"SKU-1": 2})
+            package_id = service.pack(order_id, "B-LEGACY-REJECT", "R-LEGACY-REJECT", {"SKU-1": 2})
+            service.seal_package("B-LEGACY-REJECT", "PREC-LEGACY")
+            service.dispatch("B-LEGACY-REJECT")
+            repository.execute(
+                "UPDATE packages SET status='Rechazado',received_at='2026-01-01T00:00:00+00:00' WHERE id=?",
+                (package_id,),
+            )
+            repository.connection.commit()
+            service.adjust_stock("CD", "SKU-1", 2, "despacho rechazado")
+            repository.execute("DROP TABLE rejected_package_dispositions")
+            repository.connection.commit()
+            repository.close()
+
+            migrated_repository = SQLiteRepository(database_path)
+            try:
+                disposition = migrated_repository.one(
+                    "SELECT disposition FROM rejected_package_dispositions WHERE package_id=?",
+                    (package_id,),
+                )
+                stock = migrated_repository.one(
+                    "SELECT quantity FROM stock WHERE location_id=? AND product_id=1", (cd_id,)
+                )
+                self.assertEqual(disposition["disposition"], "stock")
+                self.assertEqual(stock["quantity"], 2)
+            finally:
+                migrated_repository.close()
+
     def test_existing_packages_migrate_to_single_order_allocations(self):
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "legacy-packages.db"
