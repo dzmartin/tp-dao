@@ -287,6 +287,7 @@ class RetailService:
             )
             self._record_inventory_movement(location["id"], product["id"], delta, reason)
 
+    #Generar órdenes de compra sugeridas por faltantes
     def suggested_purchases(self) -> list[dict]:
         rows = self.repository.all(
             """SELECT p.id AS product_id,p.sku,p.name,p.minimum_stock,p.supplier_id,s.name AS supplier_name,
@@ -384,7 +385,8 @@ class RetailService:
                 "UPDATE purchase_orders SET status=? WHERE id=?",
                 ("Parcial" if remaining else "Recibida", order_id),
             )
-
+            
+    #Abrir el conteo de Realizar inventarios físicos y conciliación de diferencias
     def open_inventory_count(self, location_code: str) -> int:
         with self.repository.transaction():
             location = _require(self.repository.one("SELECT id FROM locations WHERE code=?", (location_code,)), "Ubicación inexistente.")
@@ -401,6 +403,7 @@ class RetailService:
             )
             return cursor.lastrowid
 
+    #Aplica las diferencias de stock de Realizar inventarios físicos y conciliación de diferencias
     def set_inventory_count(self, count_id: int, quantities: dict[str, int]) -> None:
         if not quantities or any(quantity < 0 for quantity in quantities.values()):
             raise BusinessRuleError("El conteo debe incluir cantidades iguales o mayores a cero.")
@@ -419,7 +422,8 @@ class RetailService:
                 )
                 if updated.rowcount != 1:
                     raise BusinessRuleError(f"El producto {sku} no pertenece a este inventario.")
-
+                
+    #Registra el movimiento de Realizar inventarios físicos y conciliación de diferencias
     def close_inventory_count(self, count_id: int) -> None:
         with self.repository.transaction():
             count = _require(self.repository.one("SELECT * FROM inventory_counts WHERE id=?", (count_id,)), "Conteo inexistente.")
@@ -522,11 +526,23 @@ class RetailService:
                     )
             return batch.lastrowid
 
-    def pack(self, order_id: int, package_code: str, dispatch_note: str, lines: dict[str, int]) -> int:
-        return self._pack_single_order(order_id, package_code, dispatch_note, lines)
+    def pack(
+        self,
+        order_id: int,
+        package_code: str,
+        dispatch_note: str,
+        lines: dict[str, int],
+        occurred_at: str | None = None,
+    ) -> int:
+        return self._pack_single_order(order_id, package_code, dispatch_note, lines, occurred_at)
 
     def pack_for_destination(
-        self, destination_code: str, package_code: str, dispatch_note: str, lines: dict[str, int]
+        self,
+        destination_code: str,
+        package_code: str,
+        dispatch_note: str,
+        lines: dict[str, int],
+        occurred_at: str | None = None,
     ) -> int:
         orders = self.repository.all(
             """SELECT o.id FROM replenishment_orders o
@@ -536,11 +552,16 @@ class RetailService:
             (destination_code,),
         )
         return self._pack_orders(
-            [order["id"] for order in orders], package_code, dispatch_note, lines
+            [order["id"] for order in orders], package_code, dispatch_note, lines, occurred_at
         )
 
     def _pack_orders(
-        self, order_ids: list[int], package_code: str, dispatch_note: str, lines: dict[str, int]
+        self,
+        order_ids: list[int],
+        package_code: str,
+        dispatch_note: str,
+        lines: dict[str, int],
+        occurred_at: str | None = None,
     ) -> int:
         if not lines or any(quantity <= 0 for quantity in lines.values()):
             raise BusinessRuleError("El bulto debe incluir cantidades positivas.")
@@ -635,7 +656,7 @@ class RetailService:
             primary_order_id = next(order["id"] for order in orders if order["id"] in allocations)
             cursor = self.repository.execute(
                 "INSERT INTO packages(code,order_id,dispatch_note,status,prepared_at) VALUES(?,?,?,'Preparado',?)",
-                (package_code, primary_order_id, dispatch_note, _now()),
+                (package_code, primary_order_id, dispatch_note, occurred_at or _now()),
             )
             package_id = cursor.lastrowid
             for order_id, product_allocations in allocations.items():
@@ -654,7 +675,7 @@ class RetailService:
                     "INSERT INTO package_lines(package_id,product_id,quantity) VALUES(?,?,?)",
                     (package_id, product_id, quantity),
                 )
-            self._event(package_id, "Preparado", "Bulto armado.")
+            self._event(package_id, "Preparado", "Bulto armado.", occurred_at)
             affected_order_ids = tuple(allocations)
             affected_placeholders = ",".join("?" for _ in affected_order_ids)
             self.repository.execute(
@@ -663,7 +684,14 @@ class RetailService:
             )
             return package_id
 
-    def _pack_single_order(self, order_id: int, package_code: str, dispatch_note: str, lines: dict[str, int]) -> int:
+    def _pack_single_order(
+        self,
+        order_id: int,
+        package_code: str,
+        dispatch_note: str,
+        lines: dict[str, int],
+        occurred_at: str | None = None,
+    ) -> int:
         if not lines or any(quantity <= 0 for quantity in lines.values()):
             raise BusinessRuleError("El bulto debe incluir cantidades positivas.")
         with self.repository.transaction():
@@ -672,7 +700,7 @@ class RetailService:
                 raise BusinessRuleError("La orden ya no admite bultos.")
             cursor = self.repository.execute(
                 "INSERT INTO packages(code,order_id,dispatch_note,status,prepared_at) VALUES(?,?,?,'Preparado',?)",
-                (package_code, order_id, dispatch_note, _now()),
+                (package_code, order_id, dispatch_note, occurred_at or _now()),
             )
             package_id = cursor.lastrowid
             self.repository.execute(
@@ -708,14 +736,20 @@ class RetailService:
                        VALUES(?,?,?,?)""",
                     (package_id, order_id, product["id"], quantity),
                 )
-            self._event(package_id, "Preparado", "Bulto armado.")
+            self._event(package_id, "Preparado", "Bulto armado.", occurred_at)
             self.repository.execute("UPDATE replenishment_orders SET status='Preparando' WHERE id=?", (order_id,))
             return package_id
-
-    def _event(self, package_id: int, state: str, detail: str = "") -> None:
+    #Segunda validacion de negocio aca
+    def _event(
+        self,
+        package_id: int,
+        state: str,
+        detail: str = "",
+        occurred_at: str | None = None,
+    ) -> None:
         self.repository.execute(
             "INSERT INTO package_events(package_id,state,occurred_at,detail) VALUES(?,?,?,?)",
-            (package_id, state, _now(), detail),
+            (package_id, state, occurred_at or _now(), detail),
         )
 
     def _package_order_ids(self, package_id: int, primary_order_id: int) -> list[int]:
@@ -750,16 +784,21 @@ class RetailService:
             ),
         )
 
-    def seal_package(self, package_code: str, seal: str) -> None:
+    def seal_package(
+        self, package_code: str, seal: str, occurred_at: str | None = None
+    ) -> None:
         with self.repository.transaction():
             package = _require(self.repository.one("SELECT * FROM packages WHERE code=?", (package_code,)), "Bulto inexistente.")
             if package["status"] != "Preparado" or not seal.strip():
                 raise BusinessRuleError("Solo se puede precintar un bulto preparado con un precinto informado.")
             self.repository.execute("UPDATE packages SET seal=?,status='Precintado' WHERE id=?", (seal.strip(), package["id"]))
-            self._event(package["id"], "Precintado", f"Precinto {seal.strip()} asignado.")
+            self._event(
+                package["id"], "Precintado", f"Precinto {seal.strip()} asignado.", occurred_at
+            )
 
-    def dispatch(self, package_code: str) -> None:
+    def dispatch(self, package_code: str, occurred_at: str | None = None) -> None:
         with self.repository.transaction():
+            occurred_at = occurred_at or _now()
             package = _require(self.repository.one("SELECT * FROM packages WHERE code=?", (package_code,)), "Bulto inexistente.")
             if package["status"] != "Precintado":
                 raise BusinessRuleError("Solo se despachan bultos precintados.")
@@ -770,30 +809,48 @@ class RetailService:
                     raise BusinessRuleError("El stock del CD cambió; no se puede despachar el bulto.")
                 self.repository.execute("UPDATE stock SET quantity=quantity-? WHERE location_id=? AND product_id=?", (line["quantity"], order["origin_id"], line["product_id"]))
                 self._record_inventory_movement(
-                    order["origin_id"], line["product_id"], -line["quantity"], "despacho", package_code
+                    order["origin_id"],
+                    line["product_id"],
+                    -line["quantity"],
+                    "despacho",
+                    package_code,
+                    occurred_at=occurred_at,
                 )
-            self.repository.execute("UPDATE packages SET status='En tránsito',dispatched_at=? WHERE id=?", (_now(), package["id"]))
-            self._event(package["id"], "En tránsito", "Despacho registrado desde el CD.")
+            self.repository.execute(
+                "UPDATE packages SET status='En tránsito',dispatched_at=? WHERE id=?",
+                (occurred_at, package["id"]),
+            )
+            self._event(package["id"], "En tránsito", "Despacho registrado desde el CD.", occurred_at)
             self.repository.execute(
                 """UPDATE replenishment_orders SET status='En tránsito'
                    WHERE id IN (SELECT order_id FROM package_orders WHERE package_id=?)""",
                 (package["id"],),
             )
-
-    def receive(self, package_code: str, seal_intact: bool, dispatch_note_ok: bool = True) -> str:
+    #Primera validacion de negocio aca
+    def receive(
+        self,
+        package_code: str,
+        seal_intact: bool,
+        dispatch_note_ok: bool = True,
+        occurred_at: str | None = None,
+        rejected_at: str | None = None,
+    ) -> str:
         with self.repository.transaction():
+            occurred_at = occurred_at or _now()
             package = _require(self.repository.one("SELECT * FROM packages WHERE code=?", (package_code,)), "Bulto inexistente.")
             if package["status"] != "En tránsito":
                 raise BusinessRuleError("Solo se reciben bultos en tránsito.")
             self.repository.execute(
                 "UPDATE packages SET status='Recibido',received_at=?,seal_intact=?,dispatch_note_ok=? WHERE id=?",
-                (_now(), int(seal_intact), int(dispatch_note_ok), package["id"]),
+                (occurred_at, int(seal_intact), int(dispatch_note_ok), package["id"]),
             )
-            self._event(package["id"], "Recibido", "Recepción registrada en el local destino.")
+            self._event(
+                package["id"], "Recibido", "Recepción registrada en el local destino.", occurred_at
+            )
             if not seal_intact or not dispatch_note_ok:
                 reason = "Precinto violado." if not seal_intact else "Remito no conforme."
                 self.repository.execute("UPDATE packages SET status='Rechazado' WHERE id=?", (package["id"],))
-                self._event(package["id"], "Rechazado", reason)
+                self._event(package["id"], "Rechazado", reason, rejected_at or occurred_at)
                 self.repository.execute(
                     """UPDATE replenishment_orders SET status='Con rechazo'
                        WHERE id IN (SELECT order_id FROM package_orders WHERE package_id=?)""",
@@ -802,10 +859,13 @@ class RetailService:
                 return "Rechazado"
             return "Recibido"
 
-    def resolve_rejected_package(self, package_code: str, disposition: str) -> None:
+    def resolve_rejected_package(
+        self, package_code: str, disposition: str, occurred_at: str | None = None
+    ) -> None:
         if disposition not in ("stock", "discard"):
             raise BusinessRuleError("La resolución debe ser devolver al stock o descartar.")
         with self.repository.transaction():
+            occurred_at = occurred_at or _now()
             package = _require(
                 self.repository.one(
                     """SELECT p.id,p.status,o.origin_id FROM packages p
@@ -830,7 +890,7 @@ class RetailService:
             self.repository.execute(
                 """INSERT INTO rejected_package_dispositions(package_id,disposition,resolved_at)
                    VALUES(?,?,?)""",
-                (package["id"], disposition, _now()),
+                (package["id"], disposition, occurred_at),
             )
             for line in lines:
                 if disposition == "stock":
@@ -841,17 +901,18 @@ class RetailService:
                     )
                     self._record_inventory_movement(
                         package["origin_id"], line["product_id"], line["quantity"],
-                        "devolución bulto rechazado", package_code,
+                        "devolución bulto rechazado", package_code, occurred_at=occurred_at,
                     )
                 else:
                     self._record_inventory_movement(
                         package["origin_id"], line["product_id"], 0,
                         "merma bulto rechazado", package_code,
-                        waste_quantity=line["quantity"],
+                        waste_quantity=line["quantity"], occurred_at=occurred_at,
                     )
 
-    def verify_package(self, package_code: str) -> None:
+    def verify_package(self, package_code: str, occurred_at: str | None = None) -> None:
         with self.repository.transaction():
+            occurred_at = occurred_at or _now()
             package = _require(self.repository.one("SELECT * FROM packages WHERE code=?", (package_code,)), "Bulto inexistente.")
             if package["status"] != "Recibido" or not package["seal_intact"] or not package["dispatch_note_ok"]:
                 raise BusinessRuleError("Solo se verifican bultos recibidos con remito y precinto conformes.")
@@ -864,10 +925,15 @@ class RetailService:
                 )
                 self._record_inventory_movement(
                     order["destination_id"], line["product_id"], line["quantity"],
-                    "recepción verificada", package_code,
+                    "recepción verificada", package_code, occurred_at=occurred_at,
                 )
             self.repository.execute("UPDATE packages SET status='Verificado' WHERE id=?", (package["id"],))
-            self._event(package["id"], "Verificado", "Remito y contenido verificados; stock liberado.")
+            self._event(
+                package["id"],
+                "Verificado",
+                "Remito y contenido verificados; stock liberado.",
+                occurred_at,
+            )
             for order_id in self._package_order_ids(package["id"], package["order_id"]):
                 unfulfilled = self.repository.one(
                     """SELECT COUNT(*) AS count FROM replenishment_lines rl WHERE rl.order_id=? AND rl.quantity >
@@ -882,6 +948,7 @@ class RetailService:
                     ("Preparando" if unfulfilled else "Completada", order_id),
                 )
 
+    #Tercera validacion de negocio aca
     def sell(
         self,
         location_code: str,
@@ -908,6 +975,8 @@ class RetailService:
             payment_values = []
             cash_tendered = 0
             other_payments = 0
+            base_allocated = 0
+            mixed_methods = len(payments) > 1
             for method, value in payments.items():
                 strategy = PAYMENT_STRATEGIES.get(method)
                 if strategy is None:
@@ -917,20 +986,54 @@ class RetailService:
                 if method == "efectivo":
                     cash_tendered += amount
                 else:
+                    base_amount = strategy.base_for(amount)
+                    if strategy.charge_for(base_amount) != amount:
+                        raise BusinessRuleError(
+                            f"El importe de {method} no coincide con el precio ajustado para esa parte de la venta."
+                        )
+                    base_allocated += base_amount
                     other_payments += amount
                     payment_values.append((method, amount))
-            cash_due = total - other_payments
-            if not payments or cash_due < 0 or cash_tendered < cash_due:
+            if not payments:
+                raise BusinessRuleError("La venta debe incluir al menos un cobro.")
+            if mixed_methods and base_allocated > total:
                 raise BusinessRuleError(
-                    "Los cobros deben cubrir el total; solo el efectivo puede superar el importe pendiente."
+                    "Las partes asignadas a tarjeta y transferencia no pueden superar el subtotal."
+                )
+            if not mixed_methods and base_allocated > total:
+                raise BusinessRuleError(
+                    "Los cobros de tarjeta y transferencia no pueden superar el subtotal de la venta."
+                )
+            cash_due = 0
+            if mixed_methods:
+                if cash_tendered:
+                    cash_due = PAYMENT_STRATEGIES["efectivo"].charge_for(total - base_allocated)
+                    if cash_tendered < cash_due:
+                        raise BusinessRuleError(
+                            "El efectivo no cubre el importe ajustado de su parte de la venta."
+                        )
+                elif base_allocated != total:
+                    raise BusinessRuleError(
+                        "Los cobros deben cubrir el subtotal distribuido entre los medios de pago."
+                    )
+            elif cash_tendered:
+                cash_due = PAYMENT_STRATEGIES["efectivo"].charge_for(total - base_allocated)
+                if cash_tendered < cash_due:
+                    raise BusinessRuleError(
+                        "Los cobros deben cubrir el total ajustado; solo el efectivo puede superar el importe pendiente."
+                    )
+            elif base_allocated != total:
+                raise BusinessRuleError(
+                    "Los cobros deben cubrir el total ajustado; solo el efectivo puede superar el importe pendiente."
                 )
             if cash_due > 0:
                 payment_values.append(("efectivo", cash_due))
+            adjusted_total = other_payments + cash_due
             receipt = f"V-{uuid4().hex[:12].upper()}"
             sale = self.repository.execute(
                 """INSERT INTO sales(receipt,location_id,sold_at,total_cents,state)
                    VALUES(?,?,?,?,?)""",
-                (receipt, location["id"], _now(), total, ConfirmedSaleState.name),
+                (receipt, location["id"], _now(), adjusted_total, ConfirmedSaleState.name),
             )
             for product, quantity, unit_price in prepared:
                 self.repository.execute(
@@ -946,7 +1049,7 @@ class RetailService:
             for method, amount in payment_values:
                 self.repository.execute("INSERT INTO payments(sale_id,method,amount_cents) VALUES(?,?,?)", (sale.lastrowid, method, amount))
             return receipt
-
+    #Ultima validacion de negocio aca
     def return_items(self, receipt: str, items: dict[str, int], restock: bool = True) -> int:
         if not items or any(quantity <= 0 for quantity in items.values()):
             raise BusinessRuleError("La devolución debe incluir cantidades positivas.")
@@ -954,16 +1057,36 @@ class RetailService:
             sale = _require(self.repository.one("SELECT * FROM sales WHERE receipt=?", (receipt,)), "No existe una venta con ese comprobante.")
             state = sale_state_from_name(sale["state"])
             state.ensure_return_allowed()
+            base_subtotal = self.repository.one(
+                "SELECT COALESCE(SUM(quantity*unit_price_cents),0) AS total FROM sale_lines WHERE sale_id=?",
+                (sale["id"],),
+            )["total"]
             prepared = []
-            total = 0
+            requested_base_amount = 0
             for sku, quantity in items.items():
                 product = _require(self.repository.one("SELECT id FROM products WHERE sku=?", (sku,)), f"Producto {sku} inexistente.")
                 line = self.repository.one("SELECT * FROM sale_lines WHERE sale_id=? AND product_id=?", (sale["id"], product["id"]))
                 if line is None or line["returned_quantity"] + quantity > line["quantity"]:
                     raise BusinessRuleError(f"La cantidad de devolución de {sku} excede lo vendido y aún no devuelto.")
-                total += line["unit_price_cents"] * quantity
+                requested_base_amount += line["unit_price_cents"] * quantity
                 prepared.append((line, quantity))
             refunded = self.repository.one("SELECT COALESCE(SUM(total_cents),0) AS total FROM returns WHERE sale_id=?", (sale["id"],))["total"]
+            previously_returned_base = self.repository.one(
+                "SELECT COALESCE(SUM(returned_quantity*unit_price_cents),0) AS total FROM sale_lines WHERE sale_id=?",
+                (sale["id"],),
+            )["total"]
+            target_refund = (
+                int(
+                    (
+                        Decimal(sale["total_cents"])
+                        * Decimal(previously_returned_base + requested_base_amount)
+                        / Decimal(base_subtotal)
+                    ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+                )
+                if base_subtotal
+                else 0
+            )
+            total = target_refund - refunded
             if refunded + total > sale["total_cents"]:
                 raise BusinessRuleError("La devolución excede el importe pagado disponible.")
             sold_quantity = self.repository.one(

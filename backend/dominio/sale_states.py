@@ -2,7 +2,8 @@ from abc import ABC, abstractmethod
 
 from backend.dominio.exceptions import BusinessRuleError
 
-
+#ACA SE APLICA EL PATRON STATE PARA DEFINIR LOS ESTADOS DE UNA VENTA. 
+#CADA ESTADO DEFINE SU NOMBRE Y LA LOGICA DE TRANSICION A OTRO ESTADO SEGUN LA CANTIDAD DEVUELTA.
 class SaleState(ABC):
     name: str
 

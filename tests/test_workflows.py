@@ -124,7 +124,9 @@ class RetailWorkflowTests(unittest.TestCase):
             self.service.sell("L01", {"SKU-1": 1}, {"efectivo": 10})
         self.service.verify_package("B-1")
         self.assertEqual(self._stock(), 5)
-        receipt = self.service.sell("L01", {"SKU-1": 2}, {"efectivo": 10, "tarjeta": 10})
+        receipt = self.service.sell(
+            "L01", {"SKU-1": 2}, {"efectivo": "5.34", "tarjeta": "14.66"}
+        )
         self.assertTrue(receipt.startswith("V-"))
         self.assertEqual(self._stock(), 3)
 
@@ -132,7 +134,9 @@ class RetailWorkflowTests(unittest.TestCase):
         self._package()
         self.service.receive("B-1", seal_intact=True)
         self.service.verify_package("B-1")
-        receipt = self.service.sell("L01", {"SKU-1": 2}, {"efectivo": 10, "tarjeta": 10})
+        receipt = self.service.sell(
+            "L01", {"SKU-1": 2}, {"efectivo": "5.34", "tarjeta": "14.66"}
+        )
         self.assertEqual(self.service.return_items(receipt, {"SKU-1": 1}), 1000)
         self.assertEqual(self._stock(), 4)
         with self.assertRaises(BusinessRuleError):
@@ -152,8 +156,8 @@ class RetailWorkflowTests(unittest.TestCase):
 
         report = self.reports.units_sold_by_category("2000-01-01", "2999-12-31", "L01")
         self.assertEqual(report, [
-            {"category": "Bebidas", "net_units": 2, "net_revenue_cents": 1000},
-            {"category": "Almacén", "net_units": 1, "net_revenue_cents": 1000},
+            {"category": "Bebidas", "net_units": 2, "net_revenue_cents": 800},
+            {"category": "Almacén", "net_units": 1, "net_revenue_cents": 800},
         ])
         self.assertEqual(
             self.reports.units_sold_by_category("2000-01-01", "2999-12-31", "CD"),
@@ -165,7 +169,7 @@ class RetailWorkflowTests(unittest.TestCase):
         self.service.receive("B-1", seal_intact=True)
         self.service.verify_package("B-1")
 
-        cash_receipt = self.service.sell("L01", {"SKU-1": 1}, {"efectivo": "15.00"})
+        cash_receipt = self.service.sell("L01", {"SKU-1": 1}, {"efectivo": "9.00"})
         cash_payments = self.repository.all(
             """SELECT p.method,p.amount_cents FROM payments p
                JOIN sales s ON s.id=p.sale_id WHERE s.receipt=?""",
@@ -173,21 +177,69 @@ class RetailWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             [(payment["method"], payment["amount_cents"]) for payment in cash_payments],
-            [("efectivo", 1000)],
+            [("efectivo", 800)],
         )
 
         mixed_receipt = self.service.sell(
-            "L01", {"SKU-1": 1}, {"efectivo": "7.00", "tarjeta": "5.00"}
+            "L01", {"SKU-1": 1}, {"efectivo": "5.00", "tarjeta": "5.50"}
         )
         mixed_payments = self.repository.all(
             """SELECT p.method,p.amount_cents FROM payments p
                JOIN sales s ON s.id=p.sale_id WHERE s.receipt=? ORDER BY p.method""",
             (mixed_receipt,),
         )
+        mixed_total = self.repository.one(
+            "SELECT total_cents FROM sales WHERE receipt=?", (mixed_receipt,)
+        )["total_cents"]
+        self.assertEqual(mixed_total, 950)
         self.assertEqual(
             [(payment["method"], payment["amount_cents"]) for payment in mixed_payments],
-            [("efectivo", 500), ("tarjeta", 500)],
+            [("efectivo", 400), ("tarjeta", 550)],
         )
+
+    def test_single_and_mixed_payment_methods_apply_their_own_adjustments(self):
+        self._package()
+        self.service.receive("B-1", seal_intact=True)
+        self.service.verify_package("B-1")
+
+        receipts = [
+            self.service.sell("L01", {"SKU-1": 1}, {"efectivo": "10.00"}),
+            self.service.sell("L01", {"SKU-1": 1}, {"tarjeta": "11.00"}),
+            self.service.sell("L01", {"SKU-1": 1}, {"transferencia": "10.00"}),
+            self.service.sell(
+                "L01", {"SKU-1": 1}, {"efectivo": "4.00", "tarjeta": "5.50"}
+            ),
+            self.service.sell(
+                "L01", {"SKU-1": 1}, {"tarjeta": "5.50", "transferencia": "5.00"}
+            ),
+        ]
+        totals = [
+            row["total_cents"]
+            for row in self.repository.all(
+                "SELECT total_cents FROM sales WHERE receipt IN (?,?,?,?,?) ORDER BY sold_at,id",
+                tuple(receipts),
+            )
+        ]
+        self.assertEqual(totals, [800, 1100, 1000, 950, 1050])
+
+    def test_mixed_non_cash_payments_must_allocate_the_full_subtotal(self):
+        self._package()
+        self.service.receive("B-1", seal_intact=True)
+        self.service.verify_package("B-1")
+
+        with self.assertRaisesRegex(BusinessRuleError, "cubrir el subtotal distribuido"):
+            self.service.sell(
+                "L01", {"SKU-1": 1}, {"tarjeta": "5.50", "transferencia": "4.99"}
+            )
+
+    def test_card_amount_must_match_a_cent_exact_adjusted_portion(self):
+        self._package()
+        self.service.receive("B-1", seal_intact=True)
+        self.service.verify_package("B-1")
+
+        with self.assertRaisesRegex(BusinessRuleError, "no coincide con el precio ajustado"):
+            self.service.sell("L01", {"SKU-1": 1}, {"tarjeta": "5.00"})
+        self.assertEqual(self._stock(), 5)
 
     def test_sale_state_transitions_from_confirmed_to_partial_and_returned(self):
         self._package()
@@ -273,7 +325,7 @@ class RetailWorkflowTests(unittest.TestCase):
             "SELECT unit_price_cents FROM sale_lines WHERE sale_id=(SELECT id FROM sales WHERE receipt=?)",
             (receipt,),
         )
-        self.assertEqual(sale["total_cents"], 1000)
+        self.assertEqual(sale["total_cents"], 800)
         self.assertEqual(line["unit_price_cents"], 1000)
 
     def test_physical_count_reconciles_stock_and_audits_delta(self):
@@ -535,7 +587,7 @@ class RetailWorkflowTests(unittest.TestCase):
         self.service.receive("B-1", seal_intact=True)
         self.service.verify_package("B-1")
 
-        invalid_payments = ({}, {"efectivo": 0}, {"bitcoin": 10}, {"efectivo": 9}, {"tarjeta": 11})
+        invalid_payments = ({}, {"efectivo": 0}, {"bitcoin": 10}, {"efectivo": "7.99"}, {"tarjeta": 10})
         for payments in invalid_payments:
             with self.subTest(payments=payments):
                 with self.assertRaises(BusinessRuleError):
@@ -562,7 +614,7 @@ class RetailWorkflowTests(unittest.TestCase):
         self.service.verify_package("B-1")
         receipt = self.service.sell("L01", {"SKU-1": 1}, {"efectivo": 10})
 
-        self.assertEqual(self.service.return_items(receipt, {"SKU-1": 1}, restock=False), 1000)
+        self.assertEqual(self.service.return_items(receipt, {"SKU-1": 1}, restock=False), 800)
         self.assertEqual(self._stock(), 4)
         movement = self.repository.one(
             "SELECT quantity_delta,movement_type FROM inventory_movements WHERE reference=? ORDER BY id DESC",

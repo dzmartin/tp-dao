@@ -121,10 +121,22 @@ def _receipt_pdf(sale: dict, lines: list[dict], payments: list[dict]) -> bytes:
         draw_line(48, y, 547, y)
         y -= 4
 
-    totals_height = 55 + 13 * len(payments)
+    subtotal = sum(line["quantity"] * line["unit_price_cents"] for line in lines)
+    adjustment = sale["total_cents"] - subtotal
+    totals_height = 85 + (16 if adjustment else 0) + 14 * len(payments)
     if y - totals_height < page_bottom:
         new_page(include_table_heading=False)
     y -= 5
+    draw_line(48, y + 8, 547, y + 8)
+    text("Subtotal", 55, y, 9)
+    right_text(_pdf_money(subtotal), 540, y, 9)
+    y -= 16
+    if adjustment:
+        adjustment_label = "Descuento por medio de pago" if adjustment < 0 else "Recargo por medio de pago"
+        text(adjustment_label, 55, y, 9)
+        right_text(_pdf_money(abs(adjustment)), 540, y, 9)
+        y -= 16
+    draw_line(48, y + 9, 547, y + 9)
     right_text(f"TOTAL  {_pdf_money(sale['total_cents'])}", 540, y, 15, True)
     y -= 28
     text("Pagado con", 55, y, 9, True)

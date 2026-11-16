@@ -54,7 +54,7 @@ def main() -> None:
         service.verify_package("B-DEMO-OK")
         check(reports.inventory_and_minimums()[0]["quantity"] == 10, "Verificación acredita las unidades al stock del local")
 
-        receipt = service.sell("L01", {"DEMO-001": 3}, {"efectivo": "20.00", "tarjeta": "10.00"})
+        receipt = service.sell("L01", {"DEMO-001": 3}, {"efectivo": "20.00", "tarjeta": "22.00"})
         check(receipt.startswith("V-"), f"Venta registrada y comprobante emitido ({receipt})")
         try:
             service.sell("L01", {"DEMO-001": 99}, {"efectivo": "990.00"})

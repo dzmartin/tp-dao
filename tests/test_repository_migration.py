@@ -252,7 +252,7 @@ class AdminRoleMigrationTests(unittest.TestCase):
                 receipt = RetailService(repository).sell("L01", {"SKU-1": 1}, {"efectivo": 8})
                 self.assertEqual(
                     repository.one("SELECT total_cents FROM sales WHERE receipt=?", (receipt,))["total_cents"],
-                    800,
+                    640,
                 )
             finally:
                 repository.close()

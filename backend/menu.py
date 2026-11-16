@@ -10,7 +10,7 @@ def _quantities(prompt: str) -> dict[str, int]:
 
 
 def _payments() -> dict[str, str]:
-	value = input("Cobros (medio:importe separados por coma; efectivo/tarjeta/transferencia): ").strip()
+	value = input("Cobros (efectivo:importe recibido; tarjeta/transferencia: importe final; separados por coma): ").strip()
 	return {method.strip(): amount.strip() for method, amount in (item.split(":", 1) for item in value.split(",") if item.strip())}
 
 

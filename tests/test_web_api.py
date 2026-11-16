@@ -218,8 +218,12 @@ class WebApiTests(unittest.TestCase):
         self.assertIn(sale["result"].encode("ascii"), pdf)
         self.assertIn(b"Producto", pdf)
         self.assertIn(b"Sucursal Local", pdf)
+        self.assertIn(b"Subtotal", pdf)
+        self.assertIn(b"$ 20,00", pdf)
+        self.assertIn(b"$ 4,00", pdf)
+        self.assertIn(b"$ 16,00", pdf)
         self.assertIn(b"TOTAL", pdf)
-        self.assertNotIn(b"Descuento", pdf)
+        self.assertIn(b"Descuento por medio de pago", pdf)
         self.assertIn(b"TOTAL", pdf)
         self.assertIn(b"Pagado con", pdf)
         self.assertIn(b"Efectivo", pdf)
@@ -233,10 +237,10 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(recorded_sale["lines"][0]["sku"], "SKU-1")
         self.assertNotIn("trace", recorded_sale["lines"][0])
         self.assertEqual(recorded_sale["lines"][0]["unit_price_cents"], 1000)
-        self.assertEqual(recorded_sale["payments"], [{"method": "efectivo", "amount_cents": 2000}])
+        self.assertEqual(recorded_sale["payments"], [{"method": "efectivo", "amount_cents": 1600}])
         return_status, returned = self.post("/api/returns", {"receipt": sale["result"], "items": [{"sku": "SKU-1", "quantity": 1}], "restock": True})
         self.assertEqual(return_status, 201)
-        self.assertEqual(returned["result"], 1000)
+        self.assertEqual(returned["result"], 800)
         _, bootstrap = self.request("/api/bootstrap")
         recorded_sale = next(item for item in json.loads(bootstrap)["sales"] if item["receipt"] == sale["result"])
         self.assertEqual(recorded_sale["state"], "Devolución parcial")
@@ -247,10 +251,10 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(report_data["best_sellers"][0]["net_units"], 1)
         self.assertEqual(
             report_data["category_sales"],
-            [{"category": "General", "net_units": 1, "net_revenue_cents": 1000}],
+            [{"category": "General", "net_units": 1, "net_revenue_cents": 800}],
         )
         self.assertEqual(report_data["logistics"]["verified_packages"], 1)
-        self.assertEqual(sum(row["net_cents"] for row in report_data["daily_sales"]), 1000)
+        self.assertEqual(sum(row["net_cents"] for row in report_data["daily_sales"]), 800)
 
     def test_seeded_accounts_expose_demo_shortcuts_and_can_login(self):
         create_random_seed(self.application, days=1, rng=random.Random(23))

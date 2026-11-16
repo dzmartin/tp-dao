@@ -5,6 +5,7 @@ class ReportService:
     def __init__(self, repository: SQLiteRepository) -> None:
         self.repository = repository
 
+    #Grafico de ventas por medio de pago
     def sales_by_period(self, start_date: str, end_date: str, location_code: str | None = None) -> list[dict]:
         rows = self.repository.all(
             """SELECT activity_date, location, payment_method, SUM(amount_cents) AS net_cents
@@ -24,6 +25,7 @@ class ReportService:
         )
         return [dict(row) for row in rows]
 
+    #Grafico de Ventas netas por día
     def net_sales_by_day(
         self, start_date: str, end_date: str, location_code: str | None = None
     ) -> list[dict]:
@@ -37,14 +39,25 @@ class ReportService:
             for activity_date, net_cents in sorted(daily_totals.items())
         ]
 
+    #Grafico de 10 productos mas vendidos
     def best_sellers_and_margin(
         self, start_date: str, end_date: str, location_code: str | None = None
     ) -> list[dict]:
         rows = self.repository.all(
-            """SELECT p.sku, p.name, SUM(sl.quantity-sl.returned_quantity) AS net_units,
-                      SUM((sl.unit_price_cents-sl.unit_cost_cents)*(sl.quantity-sl.returned_quantity)) AS margin_cents,
-                      SUM(sl.unit_price_cents*(sl.quantity-sl.returned_quantity)) AS net_revenue_cents
+            """WITH sale_totals AS (
+                   SELECT sale_id,SUM(quantity*unit_price_cents) AS base_total
+                   FROM sale_lines GROUP BY sale_id
+               )
+               SELECT p.sku, p.name, SUM(sl.quantity-sl.returned_quantity) AS net_units,
+                      SUM(CASE WHEN st.base_total=0 THEN 0 ELSE
+                          CAST(ROUND(1.0*sl.unit_price_cents*(sl.quantity-sl.returned_quantity)
+                              *s.total_cents/st.base_total) AS INTEGER) END
+                          -sl.unit_cost_cents*(sl.quantity-sl.returned_quantity)) AS margin_cents,
+                      SUM(CASE WHEN st.base_total=0 THEN 0 ELSE
+                          CAST(ROUND(1.0*sl.unit_price_cents*(sl.quantity-sl.returned_quantity)
+                              *s.total_cents/st.base_total) AS INTEGER) END) AS net_revenue_cents
                FROM sale_lines sl JOIN sales s ON s.id=sl.sale_id JOIN products p ON p.id=sl.product_id
+               JOIN sale_totals st ON st.sale_id=s.id
                JOIN locations l ON l.id=s.location_id
                WHERE substr(s.sold_at,1,10) BETWEEN ? AND ? AND (? IS NULL OR l.code=?)
                GROUP BY p.id HAVING net_units > 0
@@ -53,14 +66,22 @@ class ReportService:
         )
         return [dict(row) for row in rows]
 
+    #Grafico de productos vendidos por categoría en los locales
     def units_sold_by_category(
         self, start_date: str, end_date: str, location_code: str | None = None
     ) -> list[dict]:
         rows = self.repository.all(
-            """SELECT COALESCE(c.name,p.category,'Sin categoría') AS category,
+            """WITH sale_totals AS (
+                   SELECT sale_id,SUM(quantity*unit_price_cents) AS base_total
+                   FROM sale_lines GROUP BY sale_id
+               )
+               SELECT COALESCE(c.name,p.category,'Sin categoría') AS category,
                       SUM(sl.quantity-sl.returned_quantity) AS net_units,
-                      SUM(sl.unit_price_cents*(sl.quantity-sl.returned_quantity)) AS net_revenue_cents
+                      SUM(CASE WHEN st.base_total=0 THEN 0 ELSE
+                          CAST(ROUND(1.0*sl.unit_price_cents*(sl.quantity-sl.returned_quantity)
+                              *s.total_cents/st.base_total) AS INTEGER) END) AS net_revenue_cents
                FROM sale_lines sl JOIN sales s ON s.id=sl.sale_id
+               JOIN sale_totals st ON st.sale_id=s.id
                JOIN products p ON p.id=sl.product_id
                LEFT JOIN categories c ON c.id=p.category_id
                JOIN locations l ON l.id=s.location_id
@@ -72,6 +93,7 @@ class ReportService:
         )
         return [dict(row) for row in rows]
 
+    #Verificacion de minimo de stock por producto
     def inventory_and_minimums(self, location_code: str | None = None) -> list[dict]:
         rows = self.repository.all(
             """SELECT l.code AS location, p.sku, p.name, COALESCE(s.quantity,0) AS quantity,
@@ -85,6 +107,8 @@ class ReportService:
         )
         return [dict(row) for row in rows]
 
+    
+    #Grafico de Rechazos, mermas y tránsito
     def logistics_performance(
         self,
         start_date: str = "0001-01-01",
@@ -146,6 +170,8 @@ class ReportService:
             "waste_movements": [dict(row) for row in waste],
         }
 
+
+    #Grafico de Entradas y salidas de inventario
     def inventory_movements(
         self, start_date: str, end_date: str, location_code: str | None = None
     ) -> list[dict]:

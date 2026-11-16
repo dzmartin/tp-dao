@@ -2,6 +2,17 @@ const state = { data: null, user: null, currentView: "inicio", setupRequired: fa
 const currency = new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 2 });
 const dateTime = new Intl.DateTimeFormat("es-AR", { dateStyle: "short", timeStyle: "short" });
 const shortDate = new Intl.DateTimeFormat("es-AR", { dateStyle: "short" });
+const paymentPriceFactors = {
+  efectivo: { numerator: 4, denominator: 5 },
+  tarjeta: { numerator: 11, denominator: 10 },
+  transferencia: { numerator: 1, denominator: 1 },
+};
+const paymentMethodLabels = {
+  efectivo: "Efectivo",
+  tarjeta: "Tarjeta",
+  transferencia: "Transferencia",
+  pendiente: "Pendiente",
+};
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
@@ -17,6 +28,10 @@ function productName(sku) {
 
 function money(cents) {
   return currency.format((Number(cents) || 0) / 100);
+}
+
+function roundedRatio(numerator, denominator) {
+  return Math.floor((2 * numerator + denominator) / (2 * denominator));
 }
 
 function emptyRow(columns, message = "Todavía no hay registros.") {
@@ -512,24 +527,39 @@ function addPaymentRow() {
   const amount = document.createElement("input");
   amount.name = "amount";
   amount.type = "number";
-  amount.min = "0.01";
+  amount.min = "0";
   amount.step = "0.01";
-  amount.required = true;
   amount.placeholder = "0,00";
+  amount.dataset.autoAmount = "true";
   amount.setAttribute("aria-label", "Importe del pago");
   method.addEventListener("change", () => {
+    amount.dataset.autoAmount = "true";
+    amount.dataset.autoRemainder = "false";
     amount.setAttribute("aria-label", method.value === "efectivo" ? "Efectivo recibido" : `Importe de ${method.selectedOptions[0].textContent.toLowerCase()}`);
-    updateSaleChange();
+    updateSaleTotal(true, row === container.firstElementChild);
   });
-  amount.addEventListener("input", updateSaleChange);
+  amount.addEventListener("input", () => {
+    amount.dataset.autoAmount = "false";
+    amount.dataset.autoRemainder = "false";
+    const isFirstPayment = row === container.firstElementChild;
+    updateSaleTotal(isFirstPayment, isFirstPayment);
+  });
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "remove-row";
   remove.textContent = "Quitar";
   remove.addEventListener("click", () => {
     if (container.children.length > 1) {
+      if (row === container.firstElementChild && container.children.length === 2) {
+        const remainingAmount = container.children[1].querySelector('[name="amount"]');
+        if (remainingAmount.dataset.autoRemainder === "true") {
+          remainingAmount.value = "";
+          remainingAmount.dataset.autoRemainder = "false";
+          remainingAmount.dataset.autoAmount = "true";
+        }
+      }
       row.remove();
-      updateSaleChange();
+      updateSaleTotal();
     }
   });
   row.append(method, amount, remove);
@@ -562,12 +592,32 @@ function saleTotalCents() {
   }, 0);
 }
 
-function updateSaleTotal() {
+function paymentChargeCents(method, baseCents) {
+  const factor = paymentPriceFactors[method];
+  return roundedRatio(baseCents * factor.numerator, factor.denominator);
+}
+
+function paymentBaseCents(method, chargeCents) {
+  const factor = paymentPriceFactors[method];
+  return roundedRatio(chargeCents * factor.denominator, factor.numerator);
+}
+
+function updateSaleTotal(recalculateRemainder = true, forceRemainder = false) {
+  if (recalculateRemainder) {
+    fillSinglePaymentAmount();
+    fillSecondPaymentRemainder(forceRemainder);
+  }
   const location = document.querySelector('#sale-form [name="location_code"]')?.value || "";
   const rows = [...document.querySelectorAll("#sale-items .entry-row")];
-  const total = saleTotalCents();
-  document.querySelector("#sale-total").textContent = money(total);
-  updateSaleChange();
+  const pricing = salePaymentPricing();
+  document.querySelector("#sale-total").textContent = money(pricing.total);
+  const breakdown = pricing.breakdown
+    .map(([method, cents]) => `${paymentMethodLabels[method]}: ${money(cents)}`)
+    .join(" · ");
+  document.querySelector("#sale-payment-breakdown").textContent = breakdown
+    ? `A cobrar: ${breakdown}`
+    : "Ingresá los importes para ver cuánto corresponde a cada medio.";
+  updateSaleChange(pricing.change);
   if (location) {
     rows.forEach((row) => {
       const select = row.querySelector('[name="sku"]');
@@ -577,17 +627,101 @@ function updateSaleTotal() {
   }
 }
 
-function updateSaleChange() {
+function fillSinglePaymentAmount() {
+  const rows = [...document.querySelectorAll("#payment-rows .payment-row")];
+  if (rows.length !== 1) return;
+
+  const amount = rows[0].querySelector('[name="amount"]');
+  if (amount.dataset.autoAmount !== "true") return;
+
+  const method = rows[0].querySelector('[name="method"]').value;
+  const cents = paymentChargeCents(method, saleTotalCents());
+  amount.value = (cents / 100).toFixed(2);
+}
+
+function fillSecondPaymentRemainder(force = false) {
+  const rows = [...document.querySelectorAll("#payment-rows .payment-row")];
+  if (rows.length !== 2) return;
+
+  const secondAmount = rows[1].querySelector('[name="amount"]');
+  if (!force && secondAmount.dataset.autoAmount !== "true") return;
+
+  const firstMethod = rows[0].querySelector('[name="method"]').value;
+  const secondMethod = rows[1].querySelector('[name="method"]').value;
+  const firstAmount = Math.round((Number(rows[0].querySelector('[name="amount"]').value) || 0) * 100);
+  const remainder = firstMethod === secondMethod
+    ? Math.max(0, paymentChargeCents(firstMethod, saleTotalCents()) - firstAmount)
+    : paymentChargeCents(
+      secondMethod,
+      Math.max(0, saleTotalCents() - paymentBaseCents(firstMethod, firstAmount)),
+    );
+  secondAmount.value = (remainder / 100).toFixed(2);
+  secondAmount.dataset.autoAmount = "true";
+  secondAmount.dataset.autoRemainder = firstMethod !== secondMethod ? "true" : "false";
+}
+
+function salePaymentPricing() {
   const total = saleTotalCents();
   const amounts = [...document.querySelectorAll("#payment-rows .payment-row")].map((row) => ({
     method: row.querySelector('[name="method"]').value,
     cents: Math.round((Number(row.querySelector('[name="amount"]').value) || 0) * 100),
   }));
-  const cashTendered = amounts.filter((payment) => payment.method === "efectivo")
+  const amountsByMethod = new Map();
+  amounts.filter((payment) => payment.cents > 0).forEach((payment) => {
+    amountsByMethod.set(payment.method, (amountsByMethod.get(payment.method) || 0) + payment.cents);
+  });
+  const enteredAmounts = [...amountsByMethod].map(([method, cents]) => ({ method, cents }));
+  const methods = new Set(enteredAmounts.map((payment) => payment.method));
+  const previewMethod = methods.size
+    ? methods.values().next().value
+    : amounts[0]?.method || "efectivo";
+  const mixedMethods = methods.size > 1;
+  const cashTendered = enteredAmounts.filter((payment) => payment.method === "efectivo")
     .reduce((sum, payment) => sum + payment.cents, 0);
-  const otherPayments = amounts.filter((payment) => payment.method !== "efectivo")
+  const otherAmounts = enteredAmounts.filter((payment) => payment.method !== "efectivo");
+  const otherPayments = otherAmounts
     .reduce((sum, payment) => sum + payment.cents, 0);
-  const change = Math.max(0, cashTendered - Math.max(0, total - otherPayments));
+  const otherBase = otherAmounts
+    .reduce((sum, payment) => sum + paymentBaseCents(payment.method, payment.cents), 0);
+  const remainingBase = Math.max(0, total - otherBase);
+  const breakdown = new Map();
+  let adjustedCashDue = 0;
+  let adjustedTotal;
+  let pending = 0;
+  if (mixedMethods) {
+    otherAmounts.forEach((payment) => {
+      breakdown.set(payment.method, (breakdown.get(payment.method) || 0) + payment.cents);
+    });
+    if (methods.has("efectivo")) {
+      adjustedCashDue = paymentChargeCents("efectivo", remainingBase);
+      adjustedTotal = otherPayments + adjustedCashDue;
+      if (adjustedCashDue > 0) breakdown.set("efectivo", adjustedCashDue);
+      pending = Math.max(0, adjustedCashDue - cashTendered);
+    } else {
+      const remainderMethod = amounts[amounts.length - 1]?.method || previewMethod;
+      pending = paymentChargeCents(remainderMethod, remainingBase);
+      adjustedTotal = otherPayments + pending;
+    }
+  } else {
+    adjustedTotal = paymentChargeCents(previewMethod, total);
+    if (previewMethod === "efectivo") {
+      adjustedCashDue = adjustedTotal;
+      breakdown.set("efectivo", adjustedCashDue);
+    } else {
+      breakdown.set(previewMethod, adjustedTotal);
+    }
+  }
+  if (pending > 0) breakdown.set("pendiente", pending);
+  return {
+    total: adjustedTotal,
+    change: methods.has("efectivo") || previewMethod === "efectivo"
+      ? Math.max(0, cashTendered - adjustedCashDue)
+      : 0,
+    breakdown: [...breakdown],
+  };
+}
+
+function updateSaleChange(change) {
   const changeRow = document.querySelector("#sale-change");
   changeRow.hidden = change === 0;
   document.querySelector("#sale-change-amount").textContent = money(change);
@@ -797,14 +931,29 @@ function packageActionButtons(item) {
 function renderPackages() {
   const filter = document.querySelector("#package-filter").value;
   const packages = state.data.packages.filter((item) => !filter || item.status === filter);
-  document.querySelector("#packages-list").innerHTML = packages.map((item) => `<article class="package-card">
-    <div class="package-identity"><strong>Bulto</strong><small>Remito</small></div>
-    <div class="package-destination"><strong>${escapeHtml(item.destination_name)}</strong><small>Precinto ${escapeHtml(item.seal || "Pendiente")}</small></div>
-    <div><span class="status-pill" data-status="${escapeHtml(item.status)}">${escapeHtml(item.status)}</span><div class="package-lines">${item.lines.map((line) => `${escapeHtml(line.name || productName(line.sku))} × ${line.quantity}`).join(" · ")}</div></div>
-    <div class="package-actions">${packageActionButtons(item)}</div>
-    ${packageTimeline(item)}
-    <details class="events-detail"><summary>Referencias del bulto</summary><p><strong>Bulto:</strong> ${escapeHtml(item.code)} · <strong>Remito:</strong> ${escapeHtml(item.dispatch_note)} · <strong>Órdenes:</strong> ${escapeHtml(item.orders?.map((order) => order.code).join(", ") || item.order_code)}</p></details>
-  </article>`).join("") || '<p class="empty-cell">No hay bultos para este filtro.</p>';
+  document.querySelector("#packages-list").innerHTML = packages.map((item) => {
+    const lines = item.lines || [];
+    const totalUnits = lines.reduce((total, line) => total + line.quantity, 0);
+    const orderCodes = item.orders?.map((order) => order.code).join(", ") || item.order_code || "—";
+    const transitEnd = item.received_at || (
+      item.status === "En tránsito" ? new Date().toISOString() : null
+    );
+    const transitDuration = elapsedDuration(item.dispatched_at, transitEnd);
+    const transitLabel = item.received_at
+      ? transitDuration || "Duración no disponible"
+      : item.dispatched_at
+        ? transitDuration ? `${transitDuration} · en curso` : "Hora no disponible"
+        : "Pendiente";
+    return `<article class="package-card">
+      <div class="package-identity"><strong>${escapeHtml(item.code)}</strong><small>Remito ${escapeHtml(item.dispatch_note)}</small><small>Órdenes: ${escapeHtml(orderCodes)}</small></div>
+      <div class="package-destination"><strong>${escapeHtml(item.destination_name)}</strong><small>Precinto ${escapeHtml(item.seal || "Pendiente")}</small></div>
+      <div><span class="status-pill" data-status="${escapeHtml(item.status)}">${escapeHtml(item.status)}</span><div class="package-lines">${lines.map((line) => `${escapeHtml(line.name || productName(line.sku))} × ${line.quantity}`).join(" · ")}</div></div>
+      <div class="package-actions">${packageActionButtons(item)}</div>
+      <div class="package-summary"><span><small>Artículos</small><strong>${lines.length}</strong></span><span><small>Unidades totales</small><strong>${totalUnits}</strong></span><span><small>Tiempo de tránsito</small><strong>${escapeHtml(transitLabel)}</strong></span></div>
+      ${packageTimeline(item)}
+      <details class="events-detail"><summary>Referencias del bulto</summary><p><strong>Bulto:</strong> ${escapeHtml(item.code)} · <strong>Remito:</strong> ${escapeHtml(item.dispatch_note)} · <strong>Órdenes:</strong> ${escapeHtml(orderCodes)}</p></details>
+    </article>`;
+  }).join("") || '<p class="empty-cell">No hay bultos para este filtro.</p>';
 }
 
 function renderRejectedPackages() {
@@ -834,12 +983,33 @@ function packageTimeline(item) {
   const eventsByState = new Map(item.events.map((event) => [event.state, event]));
   return `<ol class="package-timeline" aria-label="Historial de estados del bulto">${steps.map((step, index) => {
     const event = eventsByState.get(step);
+    const previousEvent = index > 0 ? eventsByState.get(steps[index - 1]) : null;
+    const elapsed = event && previousEvent
+      ? elapsedDuration(previousEvent.occurred_at, event.occurred_at)
+      : null;
     const isCurrent = index === currentIndex;
     const className = step === "Rechazado" && isCurrent
       ? "timeline-step timeline-rejected"
       : `timeline-step ${index < currentIndex ? "timeline-completed" : isCurrent ? "timeline-current" : "timeline-pending"}`;
-    return `<li class="${className}"><strong>${escapeHtml(step)}</strong>${event ? `<p>${escapeHtml(event.detail)}</p><time datetime="${escapeHtml(event.occurred_at)}">${dateTime.format(new Date(event.occurred_at))}</time>` : ""}</li>`;
+    return `<li class="${className}"><strong>${escapeHtml(step)}</strong>${event ? `<p>${escapeHtml(event.detail)}</p><time datetime="${escapeHtml(event.occurred_at)}">${dateTime.format(new Date(event.occurred_at))}</time>${elapsed ? `<small class="timeline-duration">${escapeHtml(elapsed)} desde el estado anterior</small>` : ""}` : ""}</li>`;
   }).join("")}</ol>`;
+}
+
+function elapsedDuration(startAt, endAt) {
+  if (!startAt || !endAt) return null;
+  const start = Date.parse(startAt);
+  const end = Date.parse(endAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
+
+  const totalMinutes = Math.floor((end - start) / 60000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  return [
+    days ? `${days} d` : "",
+    hours ? `${hours} h` : "",
+    minutes || (!days && !hours) ? `${minutes} min` : "",
+  ].filter(Boolean).join(" ");
 }
 
 function renderUsers() {
@@ -872,6 +1042,12 @@ function showReceipt(receipt) {
       <td>${money(line.unit_price_cents)}</td>
       <td>${money(line.quantity * line.unit_price_cents)}</td>
     </tr>`).join("");
+  const subtotal = sale.lines.reduce((sum, line) => sum + line.quantity * line.unit_price_cents, 0);
+  const adjustment = sale.total_cents - subtotal;
+  const adjustmentLabel = adjustment < 0 ? "Descuento por medio de pago" : "Recargo por medio de pago";
+  const adjustmentLine = adjustment
+    ? `<div class="receipt-adjustment"><span>${adjustmentLabel}</span><strong>${money(adjustment)}</strong></div>`
+    : "";
   const payments = sale.payments.map((payment) => `<li><span>${escapeHtml(payment.method)}</span><strong>${money(payment.amount_cents)}</strong></li>`).join("");
   document.querySelector("#receipt-paper").innerHTML = `
     <header class="receipt-heading">
@@ -886,10 +1062,13 @@ function showReceipt(receipt) {
       <p class="receipt-date">Fecha: ${dateTime.format(new Date(sale.sold_at))}</p>
     </header>
     <div class="receipt-table-wrap"><table class="receipt-lines">
+      <colgroup><col class="receipt-col-product"><col class="receipt-col-quantity"><col class="receipt-col-price"><col class="receipt-col-amount"></colgroup>
       <thead><tr><th>Producto</th><th>Cant.</th><th>Precio</th><th>Importe</th></tr></thead>
       <tbody>${lines}</tbody>
     </table></div>
     <section class="receipt-summary">
+      <div><span>Subtotal</span><strong>${money(subtotal)}</strong></div>
+      ${adjustmentLine}
       <div class="receipt-grand-total"><span>Total</span><strong>${money(sale.total_cents)}</strong></div>
     </section>
     <section class="receipt-payments"><h3>Pagado con</h3><ul>${payments}</ul></section>
@@ -1498,7 +1677,7 @@ function bindForms() {
       body.payments = [...document.querySelectorAll("#payment-rows .payment-row")].map((row) => ({
         method: row.querySelector('[name="method"]').value,
         amount: row.querySelector('[name="amount"]').value,
-      }));
+      })).filter((payment) => Number(payment.amount) > 0);
       const response = await submitForm(event.currentTarget, "/api/sales", () => body, (receipt) => `Venta registrada. Comprobante: ${receipt}.`);
       if (response) {
         document.querySelector("#sale-items").replaceChildren();
@@ -1678,7 +1857,10 @@ function bindForms() {
     else addItemRow(container);
   }));
   document.querySelector("#add-minimum-stock-items").addEventListener("click", addMinimumStockSuggestions);
-  document.querySelector("[data-add-payment]").addEventListener("click", addPaymentRow);
+  document.querySelector("[data-add-payment]").addEventListener("click", () => {
+    addPaymentRow();
+    updateSaleTotal();
+  });
   document.querySelector("#packages-list").addEventListener("click", (event) => {
     const button = event.target.closest("[data-package-action]");
     if (button) handlePackageAction(button);
@@ -1714,6 +1896,7 @@ async function start() {
   addItemRow(document.querySelector("#package-items"));
   addItemRow(document.querySelector("#sale-items"));
   addPaymentRow();
+  updateSaleTotal();
   try {
     await initializeAuth();
   } catch (error) {
