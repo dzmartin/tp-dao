@@ -3,6 +3,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from backend.dominio.salespeople import next_salesperson_name
+
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -12,7 +14,8 @@ CREATE TABLE IF NOT EXISTS locations (
     name TEXT NOT NULL,
     type TEXT NOT NULL CHECK (type IN ('CD', 'LOCAL')),
     address TEXT NOT NULL DEFAULT '',
-    cuit TEXT NOT NULL DEFAULT ''
+    cuit TEXT NOT NULL DEFAULT '',
+    manager_name TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS app_users (
     id INTEGER PRIMARY KEY,
@@ -248,6 +251,8 @@ class SQLiteRepository:
             )
         self._ensure_column("locations", "address", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("locations", "cuit", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("locations", "manager_name", "TEXT NOT NULL DEFAULT ''")
+        self._assign_missing_location_managers()
         self._ensure_column("suppliers", "address", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("sales", "seller_name", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("products", "category_id", "INTEGER REFERENCES categories(id)")
@@ -286,6 +291,25 @@ class SQLiteRepository:
                    ), cost_is_estimated=1"""
             )
         self.connection.commit()
+
+    def _assign_missing_location_managers(self) -> None:
+        used_names = {
+            row["manager_name"]
+            for row in self.connection.execute(
+                "SELECT manager_name FROM locations WHERE type='LOCAL' AND manager_name<>''"
+            )
+        }
+        locations = self.connection.execute(
+            "SELECT id FROM locations WHERE type='LOCAL' AND manager_name='' ORDER BY id"
+        ).fetchall()
+        for location in locations:
+            manager_name = next_salesperson_name(used_names)
+            self.connection.execute(
+                "UPDATE locations SET manager_name=? WHERE id=?",
+                (manager_name, location["id"]),
+            )
+            used_names.add(manager_name)
+
     def _migrate_admin_role(self) -> None:
         definition = self.connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='app_users'"

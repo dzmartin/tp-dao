@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from backend.dominio.exceptions import BusinessRuleError
+from backend.dominio.salespeople import next_salesperson_name
 from backend.persistencia.sqlite_repository import SQLiteRepository
 from backend.datos.demo_accounts import DEMO_ACCOUNTS
 
@@ -50,6 +51,40 @@ def _password_matches(password: str, encoded: str) -> bool:
 class AuthService:
     def __init__(self, repository: SQLiteRepository) -> None:
         self.repository = repository
+        self._migrate_demo_local_names()
+
+    def _migrate_demo_local_names(self) -> None:
+        legacy_names = {"Local Centro", "Local Norte", "Local Sur", "Local Oeste"}
+        local_accounts = [
+            account for account in DEMO_ACCOUNTS if account["role"] == "LOCAL"
+        ]
+        with self.repository.transaction():
+            for account in local_accounts:
+                location = self.repository.one(
+                    """SELECT l.id,l.name FROM locations l
+                       JOIN app_users u ON u.location_id=l.id
+                       JOIN demo_account_markers m ON m.username=u.username
+                       WHERE u.username=? AND u.role='LOCAL'""",
+                    (account["username"],),
+                )
+                if (
+                    location
+                    and location["name"] in legacy_names
+                    and location["name"] != account["label"]
+                ):
+                    self.repository.execute(
+                        "UPDATE locations SET name=? WHERE id=?",
+                        (account["label"], location["id"]),
+                    )
+
+    def _next_location_manager_name(self) -> str:
+        used_names = {
+            row["manager_name"]
+            for row in self.repository.all(
+                "SELECT manager_name FROM locations WHERE type='LOCAL' AND manager_name<>''"
+            )
+        }
+        return next_salesperson_name(used_names)
 
     def setup_status(self) -> dict:
         locations = self.repository.all(
@@ -154,8 +189,9 @@ class AuthService:
                 if not local_code or not local_name:
                     raise BusinessRuleError("El código y nombre de la sucursal Local son obligatorios.")
                 cursor = self.repository.execute(
-                    "INSERT INTO locations(code,name,type) VALUES(?,?,'LOCAL')",
-                    (local_code, local_name),
+                    """INSERT INTO locations(code,name,type,manager_name)
+                       VALUES(?,?,'LOCAL',?)""",
+                    (local_code, local_name, self._next_location_manager_name()),
                 )
                 local_location = {"id": cursor.lastrowid}
             if not local_location:
@@ -206,10 +242,17 @@ class AuthService:
                 name = str(create_location.get("name", "")).strip()
                 if not code or not name:
                     raise BusinessRuleError("El código y nombre de la ubicación son obligatorios.")
-                cursor = self.repository.execute(
-                    "INSERT INTO locations(code,name,type) VALUES(?,?,?)",
-                    (code, name, role),
-                )
+                if role == "LOCAL":
+                    cursor = self.repository.execute(
+                        """INSERT INTO locations(code,name,type,manager_name)
+                           VALUES(?,?,'LOCAL',?)""",
+                        (code, name, self._next_location_manager_name()),
+                    )
+                else:
+                    cursor = self.repository.execute(
+                        "INSERT INTO locations(code,name,type) VALUES(?,?,?)",
+                        (code, name, role),
+                    )
                 location = {"id": cursor.lastrowid}
             else:
                 label = "sucursal" if role == "LOCAL" else "Centro de Distribución"

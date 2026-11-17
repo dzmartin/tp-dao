@@ -365,7 +365,7 @@ class RetailWebHandler(BaseHTTPRequestHandler):
     def _bootstrap(self, user: dict | None = None) -> dict:
         repository = self.application.repository
         locations = self._all(
-            "SELECT id,code,name,type,address,cuit FROM locations ORDER BY type DESC,code"
+            "SELECT id,code,name,type,address,cuit,manager_name FROM locations ORDER BY type DESC,code"
         )
         products = self._all(
             """SELECT p.id,p.sku,p.name,p.category,p.category_id,p.cost_cents,p.price_cents,p.minimum_stock,
@@ -425,7 +425,7 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                 (package["id"],),
             )
         sales = self._all(
-            """SELECT s.id,s.receipt,s.sold_at,s.total_cents,s.state,s.seller_name,
+            """SELECT s.id,s.receipt,s.sold_at,s.total_cents,s.state,l.manager_name AS seller_name,
                       l.code AS location_code,l.name AS location_name,
                       l.address AS location_address,l.cuit AS location_cuit,
                       cd.address AS distribution_center_address,
@@ -567,7 +567,7 @@ class RetailWebHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/sales/") and parsed.path.endswith("/receipt.pdf"):
             receipt = unquote(parsed.path[len("/api/sales/") : -len("/receipt.pdf")])
             sale = self._one(
-                """SELECT s.id,s.receipt,s.sold_at,s.total_cents,s.state,s.seller_name,
+                """SELECT s.id,s.receipt,s.sold_at,s.total_cents,s.state,l.manager_name AS seller_name,
                           l.code AS location_code,l.name AS location_name,
                           l.address AS location_address,l.cuit AS location_cuit,
                           cd.address AS distribution_center_address
@@ -929,7 +929,6 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                     body["location_code"],
                     {line["sku"]: int(line["quantity"]) for line in body["items"]},
                     payments,
-                    seller_name=user["username"],
                 )
             elif path == "/api/returns":
                 result = service.return_items(body["receipt"], {line["sku"]: int(line["quantity"]) for line in body["items"]}, bool(body["restock"]))

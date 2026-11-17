@@ -280,7 +280,7 @@
 
   <dialog class="return-dialog" id="return-dialog"><form id="return-form" method="dialog"><div class="dialog-heading"><div><p class="eyebrow">POSTVENTA</p><h2>Registrar devolución</h2></div><button class="close-button" type="button" id="close-return" aria-label="Cerrar">Cerrar</button></div>
     <input type="hidden" name="receipt"><p class="receipt-label" id="return-receipt"></p><label>Producto vendido<select name="sku" id="return-sku" required></select></label><label>Cantidad<input name="quantity" type="number" min="1" step="1" required></label>
-    <label class="check-label"><input type="checkbox" name="restock" checked><span>Producto inspeccionado y apto para volver al stock vendible</span></label><div class="dialog-actions"><button class="button button-dark" type="submit">Confirmar devolución</button></div>
+    <label class="check-label"><input type="checkbox" name="restock" checked><span>Producto inspeccionado y apto para volver al stock vendible</span></label><div class="dialog-actions"><button class="button button-dark" type="submit">Confirmar devolución</button><button class="button button-accent" type="button" id="return-all">Devolver todo lo pendiente</button></div>
   </form></dialog>
   <dialog class="receipt-dialog" id="receipt-dialog" aria-labelledby="receipt-title">
     <article class="receipt-paper" id="receipt-paper"></article>

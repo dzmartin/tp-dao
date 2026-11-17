@@ -1568,6 +1568,25 @@ function openReturnDialog(receipt) {
   document.querySelector("#return-dialog").showModal();
 }
 
+async function submitReturn(receipt, items, restock) {
+  const form = document.querySelector("#return-form");
+  const buttons = form.querySelectorAll('button[type="submit"], #return-all');
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    const result = await api("/api/returns", {
+      method: "POST",
+      body: JSON.stringify({ receipt, items, restock }),
+    });
+    document.querySelector("#return-dialog").close();
+    await refreshData();
+    toast(`Devolución registrada por ${money(result.result)}.`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
 function bindForms() {
   document.querySelector("#demo-access-buttons").addEventListener("click", (event) => {
     const button = event.target.closest("[data-demo-username]");
@@ -1769,14 +1788,28 @@ function bindForms() {
   document.querySelector("#return-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const body = formObject(event.currentTarget);
-    body.items = [{ sku: body.sku, quantity: Number(body.quantity) }];
-    body.restock = event.currentTarget.elements.restock.checked;
-    try {
-      const result = await api("/api/returns", { method: "POST", body: JSON.stringify(body) });
-      document.querySelector("#return-dialog").close();
-      await refreshData();
-      toast(`Devolución registrada por ${money(result.result)}.`);
-    } catch (error) { toast(error.message, true); }
+    await submitReturn(
+      body.receipt,
+      [{ sku: body.sku, quantity: Number(body.quantity) }],
+      event.currentTarget.elements.restock.checked,
+    );
+  });
+  document.querySelector("#return-all").addEventListener("click", async () => {
+    const form = document.querySelector("#return-form");
+    const receipt = form.elements.receipt.value;
+    const sale = state.data.sales.find((item) => item.receipt === receipt);
+    if (!sale) {
+      toast("No se encontró la venta para devolver.", true);
+      return;
+    }
+    const items = sale.lines
+      .map((line) => ({ sku: line.sku, quantity: line.quantity - line.returned_quantity }))
+      .filter((line) => line.quantity > 0);
+    if (!items.length) {
+      toast("Este comprobante ya no tiene unidades disponibles para devolver.", true);
+      return;
+    }
+    await submitReturn(receipt, items, form.elements.restock.checked);
   });
   document.querySelector("#report-form").addEventListener("submit", (event) => {
     event.preventDefault();

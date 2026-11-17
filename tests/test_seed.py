@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 from backend.container import create_application
 from backend.datos.seed import create_random_seed
+from backend.servicios.auth_service import AuthService
 
 
 class SeedTests(unittest.TestCase):
@@ -20,9 +21,27 @@ class SeedTests(unittest.TestCase):
                 all(sku.startswith("SKU-") and len(sku) == 12 and sku[4:].isdigit() for sku in skus)
             )
             locations = application.repository.all(
-                "SELECT name,address,cuit FROM locations WHERE type='LOCAL'"
+                "SELECT id,name,address,cuit,manager_name FROM locations WHERE type='LOCAL'"
             )
             self.assertEqual(len({location["name"] for location in locations}), 2)
+            self.assertEqual(
+                len({location["manager_name"] for location in locations}), 2
+            )
+            demo_location_names = {
+                row["username"]: row["name"]
+                for row in application.repository.all(
+                    """SELECT u.username,l.name FROM app_users u
+                       JOIN locations l ON l.id=u.location_id
+                       WHERE u.username IN ('demo-local-centro','demo-local-norte')"""
+                )
+            }
+            self.assertEqual(
+                demo_location_names,
+                {
+                    "demo-local-centro": "Local Centro",
+                    "demo-local-norte": "Local Norte",
+                },
+            )
             self.assertTrue(
                 all(
                     location["name"] in {"Local Centro", "Local Norte", "Local Sur", "Local Oeste"}
@@ -79,6 +98,11 @@ class SeedTests(unittest.TestCase):
                     for row in application.repository.all("SELECT seller_name FROM sales")
                 )
             )
+            for sale in application.repository.all(
+                """SELECT DISTINCT s.location_id,s.seller_name,l.manager_name
+                   FROM sales s JOIN locations l ON l.id=s.location_id"""
+            ):
+                self.assertEqual(sale["seller_name"], sale["manager_name"])
             sold_at = [
                 datetime.fromisoformat(row["sold_at"])
                 for row in application.repository.all("SELECT sold_at FROM sales")
@@ -160,6 +184,47 @@ class SeedTests(unittest.TestCase):
             self.assertEqual(
                 application.auth.authenticate("demo-local-norte", "EstrellaLocal2")["role"],
                 "LOCAL",
+            )
+        finally:
+            application.close()
+
+    def test_existing_demo_accounts_repair_randomized_location_names(self):
+        application = create_application(":memory:")
+        try:
+            center_id = application.retail.create_location(
+                "L-CENTRO", "Local Norte", "LOCAL"
+            )
+            north_id = application.retail.create_location(
+                "L-NORTE", "Local Sur", "LOCAL"
+            )
+            application.auth.create_user(
+                "demo-local-centro", "clave-demo-centro", "LOCAL", center_id
+            )
+            application.auth.create_user(
+                "demo-local-norte", "clave-demo-norte", "LOCAL", north_id
+            )
+            with application.repository.transaction():
+                for username in ("demo-local-centro", "demo-local-norte"):
+                    application.repository.execute(
+                        "INSERT INTO demo_account_markers(username) VALUES(?)",
+                        (username,),
+                    )
+
+            AuthService(application.repository)
+            demo_location_names = {
+                row["username"]: row["name"]
+                for row in application.repository.all(
+                    """SELECT u.username,l.name FROM app_users u
+                       JOIN locations l ON l.id=u.location_id
+                       WHERE u.username IN ('demo-local-centro','demo-local-norte')"""
+                )
+            }
+            self.assertEqual(
+                demo_location_names,
+                {
+                    "demo-local-centro": "Local Centro",
+                    "demo-local-norte": "Local Norte",
+                },
             )
         finally:
             application.close()

@@ -244,12 +244,20 @@ class AdminRoleMigrationTests(unittest.TestCase):
                 self.assertEqual(repository.one("SELECT total_cents FROM returns WHERE id=1")["total_cents"], 800)
                 self.assertEqual(repository.one("SELECT amount_cents FROM return_payments WHERE id=1")["amount_cents"], 800)
                 self.assertEqual(repository.all("PRAGMA foreign_key_check"), [])
+                manager_name = repository.one(
+                    "SELECT manager_name FROM locations WHERE code='L01'"
+                )["manager_name"]
+                self.assertTrue(manager_name)
 
                 repository.execute(
                     "INSERT INTO stock(location_id,product_id,quantity) VALUES(1,1,1)"
                 )
                 repository.connection.commit()
                 receipt = RetailService(repository).sell("L01", {"SKU-1": 1}, {"efectivo": 8})
+                self.assertEqual(
+                    repository.one("SELECT seller_name FROM sales WHERE receipt=?", (receipt,))["seller_name"],
+                    manager_name,
+                )
                 self.assertEqual(
                     repository.one("SELECT total_cents FROM sales WHERE receipt=?", (receipt,))["total_cents"],
                     640,

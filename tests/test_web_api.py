@@ -8,6 +8,7 @@ from threading import Thread
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from backend.api.pdf_utils import pdf_text
 from backend.container import create_application
 from backend.datos.seed import create_random_seed
 from backend.api.web_server import RetailWebHandler
@@ -366,7 +367,10 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(sale_data["location_address"], "Mitre 123, Rosario, Santa Fe")
         self.assertEqual(sale_data["location_cuit"], "30-12345678-9")
-        self.assertEqual(sale_data["seller_name"], "local01")
+        location_manager = self.application.repository.one(
+            "SELECT manager_name FROM locations WHERE code='L01'"
+        )["manager_name"]
+        self.assertEqual(sale_data["seller_name"], location_manager)
         self.assertEqual(
             sale_data["distribution_center_address"],
             "Rivadavia 456, Buenos Aires, Buenos Aires",
@@ -386,7 +390,10 @@ class WebApiTests(unittest.TestCase):
         self.assertIn(b"Sucursal Local", pdf)
         self.assertIn(b"Domicilio del local: Mitre 123, Rosario, Santa Fe", pdf)
         self.assertIn(b"CUIT del local: 30-12345678-9", pdf)
-        self.assertIn(b"Vendedor/a: local01", pdf)
+        self.assertIn(
+            f"Vendedor/a: {pdf_text(sale_data['seller_name'])}".encode("ascii"),
+            pdf,
+        )
         self.assertIn(b"Domicilio del centro de distribuci", pdf)
         self.assertIn(b"Proveedor", pdf)
         self.assertIn(b"Belgrano 789, C", pdf)

@@ -6,6 +6,7 @@ from pathlib import Path
 from backend.container import create_application
 from backend.datos.demo_accounts import DEMO_ACCOUNTS
 from backend.dominio.payment_strategies import PAYMENT_STRATEGIES
+from backend.dominio.salespeople import SALESPERSON_NAMES
 
 
 PRODUCT_NAMES = (
@@ -26,16 +27,6 @@ LOCALITIES = (
     ("Mendoza", "Mendoza"),
     ("La Plata", "Buenos Aires"),
 )
-SALESPERSON_NAMES = (
-    "Lucía Fernández",
-    "Mateo González",
-    "Sofía Rodríguez",
-    "Benjamín López",
-    "Valentina Martínez",
-    "Joaquín Pérez",
-)
-
-
 def _random_address(rng: random.Random) -> str:
     locality, province = rng.choice(LOCALITIES)
     return (
@@ -110,13 +101,16 @@ def create_random_seed(application, days: int = 30, rng: random.Random | None = 
 
     locations = []
     location_ids = []
-    local_names = rng.sample(("Centro", "Norte", "Sur", "Oeste"), k=2)
-    for index, local_name in enumerate(local_names, start=1):
+    local_accounts = [
+        account for account in DEMO_ACCOUNTS if account["role"] == "LOCAL"
+    ]
+    local_accounts.sort(key=lambda account: account["location"])
+    for index, account in enumerate(local_accounts, start=1):
         code = f"L-{suffix}-{index:02d}"
         location_ids.append(
             service.create_location(
                 code,
-                f"Local {local_name}",
+                account["label"],
                 "LOCAL",
                 address=_random_address(rng),
                 cuit=_random_cuit(rng),
@@ -307,7 +301,6 @@ def create_random_seed(application, days: int = 30, rng: random.Random | None = 
                     location,
                     items,
                     {method: f"{payment_cents // 100}.{payment_cents % 100:02d}"},
-                    seller_name=rng.choice(SALESPERSON_NAMES),
                 )
                 sale_datetime = datetime.combine(
                     sale_day,

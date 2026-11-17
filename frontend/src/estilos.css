@@ -334,7 +334,7 @@ input::placeholder { color: #b0bab3; }
 .receipt-actions { display: flex; justify-content: end; gap: 8px; }
 .check-label { display: flex; grid-template-columns: auto 1fr; align-items: center; gap: 9px; color: var(--ink-soft); font-size: 10px; font-weight: 500; line-height: 1.5; }
 .check-label input { width: 16px; height: 16px; accent-color: #457353; }
-.dialog-actions { display: flex; justify-content: end; }
+.dialog-actions { display: flex; flex-wrap: wrap; justify-content: end; gap: 8px; }
 .toast-region { position: fixed; right: 20px; bottom: 18px; z-index: 10; display: grid; gap: 8px; }
 .toast { max-width: min(380px, calc(100vw - 40px)); padding: 12px 15px; border: 1px solid #d9e7d7; border-left: 4px solid #5d9a65; border-radius: 4px; background: white; box-shadow: 0 10px 28px rgba(17,39,30,.14); color: var(--ink); font-size: 11px; animation: appear .18s ease-out; }
 .toast.error { border-color: #efd5cc; border-left-color: #bb5944; }

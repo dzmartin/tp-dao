@@ -7,6 +7,7 @@ from backend.dominio.entities import PackageState
 from backend.persistencia.sqlite_repository import SQLiteRepository
 from backend.dominio.payment_strategies import PAYMENT_STRATEGIES
 from backend.dominio.sale_states import ConfirmedSaleState, sale_state_from_name
+from backend.dominio.salespeople import next_salesperson_name
 
 
 def _now() -> str:
@@ -40,9 +41,19 @@ class RetailService:
         with self.repository.transaction():
             if location_type == "CD" and self.repository.one("SELECT id FROM locations WHERE type='CD'"):
                 raise BusinessRuleError("Ya existe un Centro de Distribución central.")
+            manager_name = ""
+            if location_type == "LOCAL":
+                used_names = {
+                    row["manager_name"]
+                    for row in self.repository.all(
+                        "SELECT manager_name FROM locations WHERE type='LOCAL' AND manager_name<>''"
+                    )
+                }
+                manager_name = next_salesperson_name(used_names)
             cursor = self.repository.execute(
-                "INSERT INTO locations(code,name,type,address,cuit) VALUES(?,?,?,?,?)",
-                (code.strip(), name.strip(), location_type, address.strip(), cuit.strip()),
+                """INSERT INTO locations(code,name,type,address,cuit,manager_name)
+                   VALUES(?,?,?,?,?,?)""",
+                (code.strip(), name.strip(), location_type, address.strip(), cuit.strip(), manager_name),
             )
             return cursor.lastrowid
 
@@ -80,8 +91,10 @@ class RetailService:
             if location_type != current["type"] and (references or has_local_accounts):
                 raise BusinessRuleError("No se puede cambiar el tipo de una ubicación con operaciones asociadas.")
             self.repository.execute(
-                "UPDATE locations SET code=?,name=?,type=? WHERE id=?",
-                (code.strip(), name.strip(), location_type, location_id),
+                """UPDATE locations SET code=?,name=?,type=?,
+                   manager_name=CASE WHEN ?='LOCAL' THEN manager_name ELSE '' END
+                   WHERE id=?""",
+                (code.strip(), name.strip(), location_type, location_type, location_id),
             )
 
     def delete_location(self, location_id: int) -> None:
@@ -1075,6 +1088,7 @@ class RetailService:
             location = _require(self.repository.one("SELECT * FROM locations WHERE code=?", (location_code,)), "Local inexistente.")
             if location["type"] != "LOCAL":
                 raise BusinessRuleError("Las ventas solo se registran en locales.")
+            seller_name = seller_name.strip() or location["manager_name"]
             prepared = []
             total = 0
             for sku, quantity in items.items():
@@ -1153,7 +1167,7 @@ class RetailService:
                     _now(),
                     adjusted_total,
                     ConfirmedSaleState.name,
-                    seller_name.strip(),
+                    seller_name,
                 ),
             )
             for product, quantity, unit_price in prepared:

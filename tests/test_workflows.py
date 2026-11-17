@@ -205,6 +205,51 @@ class RetailWorkflowTests(unittest.TestCase):
         margin = self.reports.best_sellers_and_margin("2000-01-01", "2999-12-31")[0]["margin_cents"]
         self.assertEqual(margin, 550)
 
+    def test_sales_use_the_same_assigned_manager_for_each_location(self):
+        manager = self.repository.one(
+            "SELECT manager_name FROM locations WHERE code='L01'"
+        )["manager_name"]
+        second_location_id = self.service.create_location(
+            "L02", "Local Norte", "LOCAL"
+        )
+        second_manager = self.repository.one(
+            "SELECT manager_name FROM locations WHERE id=?", (second_location_id,)
+        )["manager_name"]
+        self.assertNotEqual(manager, second_manager)
+
+        self._deliver("SKU-1", 3, "B-MANAGER")
+        self.service.sell("L01", {"SKU-1": 1}, {"transferencia": "10.00"})
+        self.service.sell("L01", {"SKU-1": 1}, {"transferencia": "10.00"})
+        sellers = self.repository.all("SELECT seller_name FROM sales ORDER BY id")
+        self.assertEqual([row["seller_name"] for row in sellers], [manager, manager])
+
+    def test_returning_all_remaining_items_at_once_restocks_each_product(self):
+        self.service.create_product("SKU-2", "Otro producto", "Bebidas", "2.00", "5.00", 1)
+        self._deliver("SKU-1", 3, "B-ALL-1")
+        self._deliver("SKU-2", 3, "B-ALL-2")
+        receipt = self.service.sell(
+            "L01", {"SKU-1": 2, "SKU-2": 2}, {"efectivo": 24}
+        )
+
+        self.assertEqual(self.service.return_items(receipt, {"SKU-1": 1}), 800)
+        self.assertEqual(
+            self.service.return_items(receipt, {"SKU-1": 1, "SKU-2": 2}),
+            1600,
+        )
+        sale = self.repository.one("SELECT state FROM sales WHERE receipt=?", (receipt,))
+        self.assertEqual(sale["state"], "Devuelta")
+        returned_stock = self.repository.all(
+            """SELECT p.sku, st.quantity FROM stock st
+               JOIN locations l ON l.id=st.location_id
+               JOIN products p ON p.id=st.product_id
+               WHERE l.code='L01' AND p.sku IN ('SKU-1','SKU-2')
+               ORDER BY p.sku"""
+        )
+        self.assertEqual(
+            [(row["sku"], row["quantity"]) for row in returned_stock],
+            [("SKU-1", 3), ("SKU-2", 3)],
+        )
+
     def test_units_sold_by_category_uses_net_sales_and_location_filter(self):
         self.service.create_product("SKU-2", "Bebida", "Bebidas", "2.00", "5.00", 1)
         self._deliver("SKU-1", 3, "B-CAT-1")
