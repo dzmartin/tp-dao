@@ -58,11 +58,13 @@ Las operaciones también están disponibles como API desde `RetailService`, inst
 
 ## Flujo logístico y reglas
 
-1. Consolidar en una orden las necesidades de uno o más locales, con origen en el CD. La orden crea una suborden por destino.
+1. Consolidar en una orden las necesidades de uno o más locales, con origen en el CD. La orden crea una suborden por destino; cada local puede modificar los productos y cantidades de su suborden mientras siga `Abierta`.
 2. Preparar bultos por local. El resumen reúne las cantidades pendientes de todas sus órdenes abiertas; cada bulto puede cubrir varias órdenes del mismo destino, asignando primero a la más antigua y conservando la trazabilidad por orden. Se comprueban las cantidades solicitadas y el stock disponible, incluyendo reservas de otros bultos.
-3. Asignar un precinto y registrar el despacho. El stock del CD se descuenta al despachar.
-4. Registrar la recepción y confirmar remito y precinto. Una no conformidad marca el bulto como `Rechazado`; sus productos no ingresan al stock del local.
-5. Verificar el contenido para pasar a `Verificado`. Solo entonces se acredita stock vendible. Los eventos se guardan en una tabla con restricciones que impiden actualizarlos o borrarlos.
+3. Asignar un precinto al bulto.
+4. Antes del despacho, el CD puede cancelar un bulto `Preparado` o `Precintado`. Se recalculan las cantidades pendientes de las órdenes y se conserva el historial del bulto; no se permite cancelar después del despacho.
+5. Registrar el despacho. El stock del CD se descuenta al despachar.
+6. Registrar la recepción y confirmar remito y precinto. Una no conformidad marca el bulto como `Rechazado`; sus productos no ingresan al stock del local.
+7. Verificar el contenido para pasar a `Verificado`. Solo entonces se acredita stock vendible. Los eventos se guardan en una tabla con restricciones que impiden actualizarlos o borrarlos.
 
 Las ventas validan el stock disponible y ajustan el precio según el medio de pago: tarjeta suma 10 %, transferencia mantiene el precio y efectivo descuenta 20 %. Si se mezclan medios, cada parte de la venta recibe el ajuste de su propio medio; el efectivo puede superar el importe pendiente de su parte y generar vuelto. El stock local no se puede aumentar mediante ajustes manuales: se libera al verificar un bulto recibido o se corrige mediante un inventario físico conciliado. El comprobante web y su PDF muestran sucursal, número y fecha de venta, artículos, subtotal, ajuste, total y medios de pago, en un formato sencillo de ticket comercial. Las devoluciones deben referenciar una venta existente y respetar cantidades aún no devueltas; la inspección define si las unidades vuelven al stock o se registran como merma, y el reembolso se descuenta de los ingresos por medio de pago.
 
@@ -84,6 +86,8 @@ Las ventas validan el stock disponible y ajustan el precio según el medio de pa
 ## Reportes
 
 `ReportService` permite filtrar los reportes por período y local. Incluye el gráfico diario de ventas netas, ventas netas de devoluciones por fecha/local/medio de pago, productos más vendidos y margen estimado, existencias y stock mínimo, bultos rechazados, mermas efectivas de devoluciones no aptas (con cantidad y costo), y tránsito promedio de los bultos verificados en el período y local elegidos. Los rechazos logísticos se informan aparte porque sus unidades vuelven al CD y no constituyen merma. Cada movimiento guarda el costo unitario vigente para su valorización histórica; los movimientos anteriores a esta migración se señalan como estimados porque se valorizan con el costo actual disponible al migrar.
+
+Desde la pantalla Reportes se puede descargar un PDF resumen con el período y local seleccionados, los indicadores de ventas, productos, categorías, inventario, logística y movimientos disponibles para el perfil. El documento identifica a quien lo solicitó y la fecha y hora de generación; también incluye domicilio y CUIT de los locales del alcance. Los usuarios Local solo pueden generar el informe de su propia sucursal.
 
 ## Pruebas
 

@@ -10,7 +10,9 @@ CREATE TABLE IF NOT EXISTS locations (
     id INTEGER PRIMARY KEY,
     code TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('CD', 'LOCAL'))
+    type TEXT NOT NULL CHECK (type IN ('CD', 'LOCAL')),
+    address TEXT NOT NULL DEFAULT '',
+    cuit TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS app_users (
     id INTEGER PRIMARY KEY,
@@ -35,7 +37,8 @@ CREATE TABLE IF NOT EXISTS suppliers (
     tax_id TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     phone TEXT NOT NULL DEFAULT '',
-    email TEXT NOT NULL DEFAULT ''
+    email TEXT NOT NULL DEFAULT '',
+    address TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY,
@@ -160,7 +163,8 @@ CREATE TABLE IF NOT EXISTS sales (
     location_id INTEGER NOT NULL REFERENCES locations(id),
     sold_at TEXT NOT NULL,
     total_cents INTEGER NOT NULL CHECK (total_cents >= 0),
-    state TEXT NOT NULL DEFAULT 'Confirmada'
+    state TEXT NOT NULL DEFAULT 'Confirmada',
+    seller_name TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS sale_lines (
     id INTEGER PRIMARY KEY,
@@ -242,6 +246,10 @@ class SQLiteRepository:
             self.connection.execute(
                 "ALTER TABLE sales ADD COLUMN state TEXT NOT NULL DEFAULT 'Confirmada'"
             )
+        self._ensure_column("locations", "address", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("locations", "cuit", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("suppliers", "address", "TEXT NOT NULL DEFAULT ''")
+        self._ensure_column("sales", "seller_name", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("products", "category_id", "INTEGER REFERENCES categories(id)")
         self._ensure_column("replenishment_orders", "batch_id", "INTEGER REFERENCES replenishment_batches(id)")
         self._clear_legacy_traceability()
@@ -402,12 +410,15 @@ class SQLiteRepository:
                         location_id INTEGER NOT NULL REFERENCES locations(id),
                         sold_at TEXT NOT NULL,
                         total_cents INTEGER NOT NULL CHECK (total_cents >= 0),
-                        state TEXT NOT NULL DEFAULT 'Confirmada'
+                        state TEXT NOT NULL DEFAULT 'Confirmada',
+                        seller_name TEXT NOT NULL DEFAULT ''
                     )"""
                 )
                 self.connection.execute(
-                    """INSERT INTO sales_new(id,receipt,location_id,sold_at,total_cents,state)
-                       SELECT id,receipt,location_id,sold_at,total_cents,state FROM sales"""
+                    """INSERT INTO sales_new(
+                           id,receipt,location_id,sold_at,total_cents,state,seller_name
+                       )
+                       SELECT id,receipt,location_id,sold_at,total_cents,state,seller_name FROM sales"""
                 )
                 self.connection.execute("DROP TABLE sales")
                 self.connection.execute("ALTER TABLE sales_new RENAME TO sales")

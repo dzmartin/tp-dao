@@ -45,6 +45,65 @@ class RetailWorkflowTests(unittest.TestCase):
         )
         return row["quantity"] if row else 0
 
+    def test_prepared_and_sealed_packages_can_be_cancelled_and_repacked(self):
+        prepared_order = self.service.create_replenishment("L01", {"SKU-1": 5})
+        self.service.pack(prepared_order, "B-CANCEL-PREP", "R-CANCEL-PREP", {"SKU-1": 2})
+        self.service.cancel_package("B-CANCEL-PREP")
+
+        self.assertEqual(
+            self.repository.one(
+                "SELECT status FROM packages WHERE code='B-CANCEL-PREP'"
+            )["status"],
+            "Cancelado",
+        )
+        self.assertEqual(
+            self.repository.one(
+                "SELECT status FROM replenishment_orders WHERE id=?", (prepared_order,)
+            )["status"],
+            "Abierta",
+        )
+        self.assertEqual(
+            [row["state"] for row in self.repository.all(
+                """SELECT state FROM package_events e JOIN packages p ON p.id=e.package_id
+                   WHERE p.code='B-CANCEL-PREP' ORDER BY e.id"""
+            )],
+            ["Preparado", "Cancelado"],
+        )
+        self.service.pack(prepared_order, "B-CANCEL-PREP-RETRY", "R-CANCEL-PREP-RETRY", {"SKU-1": 5})
+
+        sealed_order = self.service.create_replenishment("L01", {"SKU-1": 4})
+        self.service.pack(sealed_order, "B-CANCEL-SEAL", "R-CANCEL-SEAL", {"SKU-1": 2})
+        self.service.seal_package("B-CANCEL-SEAL", "PREC-CANCEL-SEAL")
+        self.service.cancel_package("B-CANCEL-SEAL")
+
+        self.assertEqual(
+            self.repository.one(
+                "SELECT status FROM replenishment_orders WHERE id=?", (sealed_order,)
+            )["status"],
+            "Abierta",
+        )
+        self.assertEqual(
+            [row["state"] for row in self.repository.all(
+                """SELECT state FROM package_events e JOIN packages p ON p.id=e.package_id
+                   WHERE p.code='B-CANCEL-SEAL' ORDER BY e.id"""
+            )],
+            ["Preparado", "Precintado", "Cancelado"],
+        )
+        self.service.pack(sealed_order, "B-CANCEL-SEAL-RETRY", "R-CANCEL-SEAL-RETRY", {"SKU-1": 4})
+
+    def test_dispatched_package_cannot_be_cancelled(self):
+        self._package()
+
+        with self.assertRaises(BusinessRuleError):
+            self.service.cancel_package("B-1")
+
+        self.assertEqual(
+            self.repository.one(
+                "SELECT status FROM packages WHERE code='B-1'"
+            )["status"],
+            "En tránsito",
+        )
+
     def test_broken_seal_rejects_package_without_releasing_stock(self):
         self._package()
         self.assertEqual(self.service.receive("B-1", seal_intact=False), "Rechazado")

@@ -13,6 +13,7 @@ class LocationType(StrEnum):
 class PackageState(StrEnum):
     PREPARED = "Preparado"
     SEALED = "Precintado"
+    CANCELLED = "Cancelado"
     IN_TRANSIT = "En tránsito"
     RECEIVED = "Recibido"
     VERIFIED = "Verificado"
@@ -59,6 +60,7 @@ class Product:
 # class PackageState:
 #     PREPARED = "Preparado"
 #     SEALED = "Precintado"
+#     CANCELLED = "Cancelado"
 #     IN_TRANSIT = "En tránsito"
 #     RECEIVED = "Recibido"
 #     VERIFIED = "Verificado"

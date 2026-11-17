@@ -211,13 +211,13 @@
             <p class="form-help">La solicitud se enviará al Centro de Distribución para tu sucursal.</p>
             <div class="minimum-stock-suggestion"><p class="form-help">Puedes agregar automáticamente los productos que están por debajo del mínimo.</p><button class="small-action" id="add-minimum-stock-items" type="button">Agregar sugerencias de stock mínimo</button></div>
             <div class="items-heading"><span>PRODUCTOS SOLICITADOS</span><button class="text-button" type="button" data-add-row="order-items">+ Agregar línea</button></div>
-            <div class="item-rows" id="order-items"></div><button class="button button-dark" type="submit">Enviar solicitud</button>
+            <div class="item-rows" id="order-items"></div><div class="order-form-actions"><button class="button button-dark" type="submit">Enviar solicitud</button><button class="text-button" id="cancel-order-edit" type="button" hidden>Cancelar edición</button></div>
           </form>
         </div>
         <section class="panel section-panel"><div class="panel-heading"><div><p class="eyebrow">POR UBICACIÓN</p><h2>Existencia actual</h2></div><select id="stock-filter" class="compact-select"><option value="">Todas las ubicaciones</option></select></div>
           <div class="table-wrap"><table><thead><tr><th>UBICACIÓN</th><th>PRODUCTO</th><th>DISPONIBLE</th><th>MÍNIMO</th><th>VALORIZACIÓN</th></tr></thead><tbody id="stock-table"></tbody></table></div>
         </section>
-        <section class="panel section-panel"><div class="panel-heading"><div><p class="eyebrow">PEDIDOS INTERNOS</p><h2>Órdenes consolidadas y subórdenes por destino</h2></div></div><div class="table-wrap"><table><thead><tr><th>ORDEN / SUBORDEN</th><th>ORIGEN</th><th>DESTINO</th><th>ARTÍCULOS</th><th>ESTADO</th><th>FECHA</th></tr></thead><tbody id="orders-table"></tbody></table></div></section>
+        <section class="panel section-panel"><div class="panel-heading"><div><p class="eyebrow">PEDIDOS INTERNOS</p><h2>Órdenes consolidadas y subórdenes por destino</h2></div></div><div class="table-wrap"><table><thead><tr><th>ORDEN / SUBORDEN</th><th>ORIGEN</th><th>DESTINO</th><th>ARTÍCULOS</th><th>ESTADO</th><th>FECHA</th><th></th></tr></thead><tbody id="orders-table"></tbody></table></div></section>
         <section class="panel section-panel"><div class="panel-heading"><div><p class="eyebrow">CONTEO Y CONCILIACIÓN</p><h2>Inventarios físicos</h2></div><form class="inline-form" id="inventory-count-form"><select name="location_code" class="location-select" required aria-label="Ubicación para inventariar"></select><button class="button button-dark" type="submit">Iniciar conteo</button></form></div><div class="count-list" id="inventory-counts"></div><div class="table-wrap"><table><thead><tr><th>CONTEO</th><th>UBICACIÓN</th><th>ESTADO</th><th>FECHA DE APERTURA</th></tr></thead><tbody id="inventory-count-history"></tbody></table></div></section>
       </section>
 
@@ -235,7 +235,7 @@
           <div class="items-heading"><span>CONTENIDO DEL BULTO</span><button class="text-button" type="button" data-add-row="package-items">+ Agregar línea</button></div><div class="item-rows item-rows-wide" id="package-items"></div>
           <button class="button button-dark" type="submit">Preparar bulto</button>
         </form>
-        <section class="panel section-panel"><div class="panel-heading"><div><p class="eyebrow">TRAZABILIDAD</p><h2>Bultos y acciones</h2></div><select id="package-filter" class="compact-select"><option value="">Todos los estados</option><option>Preparado</option><option>Precintado</option><option>En tránsito</option><option>Recibido</option><option>Verificado</option><option>Rechazado</option></select></div><div class="package-list" id="packages-list"></div></section>
+        <section class="panel section-panel"><div class="panel-heading"><div><p class="eyebrow">TRAZABILIDAD</p><h2>Bultos y acciones</h2></div><select id="package-filter" class="compact-select"><option value="">Todos los estados</option><option>Preparado</option><option>Precintado</option><option>Cancelado</option><option>En tránsito</option><option>Recibido</option><option>Verificado</option><option>Rechazado</option></select></div><div class="package-list" id="packages-list"></div></section>
       </section>
 
       <section class="page-view" id="view-mermas" data-roles="CD">
@@ -265,7 +265,7 @@
 
       <section class="page-view" id="view-reportes" data-roles="ADMIN,CD,LOCAL">
         <div class="page-heading"><div><p class="eyebrow">ANÁLISIS</p><h1 id="report-title">Reportes operativos</h1><p class="lede" id="report-description">Ingresos netos, márgenes, existencias, tránsito y movimientos.</p></div></div>
-        <form class="panel report-controls" id="report-form"><label>Desde<input name="start" type="date" required></label><label>Hasta<input name="end" type="date" required></label><label>Local<select name="location"><option value="">Todos los locales</option></select></label><button class="button button-dark" type="submit">Generar reportes</button></form>
+        <form class="panel report-controls" id="report-form"><label>Desde<input name="start" type="date" required></label><label>Hasta<input name="end" type="date" required></label><label>Local<select name="location"><option value="">Todos los locales</option></select></label><button class="button button-dark" type="submit">Generar reportes</button><button class="button button-dark" id="download-reports-pdf" type="button">Descargar resumen PDF</button></form>
         <div class="report-grid">
           <section class="panel report-panel report-wide" id="daily-sales-panel"><div class="panel-heading"><div><p class="eyebrow">VENTA NETA</p><h2>Ventas netas por día</h2></div></div><div class="daily-chart" id="daily-sales-chart" role="img" aria-label="Gráfico de ventas netas por día"></div></section>
           <section class="panel report-panel payment-report-panel"><div class="panel-heading"><div><p class="eyebrow">RENDIMIENTO COMERCIAL</p><h2>Ventas por medio de pago</h2></div></div><div class="report-chart" id="payment-method-chart" role="img" aria-label="Ventas netas agrupadas por medio de pago"></div><div class="table-wrap report-records payment-records"><table><thead><tr><th>FECHA</th><th>LOCAL</th><th>MEDIO</th><th>NETO</th></tr></thead><tbody id="report-sales"></tbody></table></div></section>

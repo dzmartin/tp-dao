@@ -18,6 +18,43 @@ PRODUCT_NAMES = (
 CATEGORIES = ("Almacén", "Bebidas", "Limpieza", "Snacks")
 PAYMENT_METHODS = ("efectivo", "tarjeta", "transferencia")
 PRODUCT_COUNT = 15
+STREET_NAMES = ("San Martín", "Belgrano", "Rivadavia", "Mitre", "Sarmiento", "Italia")
+LOCALITIES = (
+    ("Buenos Aires", "Buenos Aires"),
+    ("Córdoba", "Córdoba"),
+    ("Rosario", "Santa Fe"),
+    ("Mendoza", "Mendoza"),
+    ("La Plata", "Buenos Aires"),
+)
+SALESPERSON_NAMES = (
+    "Lucía Fernández",
+    "Mateo González",
+    "Sofía Rodríguez",
+    "Benjamín López",
+    "Valentina Martínez",
+    "Joaquín Pérez",
+)
+
+
+def _random_address(rng: random.Random) -> str:
+    locality, province = rng.choice(LOCALITIES)
+    return (
+        f"{rng.choice(STREET_NAMES)} {rng.randint(100, 3999)}, "
+        f"{locality}, {province}"
+    )
+
+
+def _random_cuit(rng: random.Random) -> str:
+    prefix = rng.choice(("30", "33"))
+    digits = prefix + f"{rng.randrange(100_000_000):08d}"
+    weights = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
+    checksum = sum(int(digit) * weight for digit, weight in zip(digits, weights))
+    check_digit = 11 - checksum % 11
+    if check_digit == 11:
+        check_digit = 0
+    elif check_digit == 10:
+        check_digit = 9
+    return f"{digits[:2]}-{digits[2:10]}-{check_digit}"
 
 
 def _shipment_timeline(shipment_day: date, rng: random.Random) -> dict[str, datetime]:
@@ -59,7 +96,17 @@ def create_random_seed(application, days: int = 30, rng: random.Random | None = 
     central = repository.one("SELECT code FROM locations WHERE type='CD' ORDER BY id LIMIT 1")
     central_code = central["code"] if central else f"CD-{suffix}"
     if not central:
-        service.create_location(central_code, "Centro de Distribución", "CD")
+        service.create_location(
+            central_code,
+            "Centro de Distribución",
+            "CD",
+            address=_random_address(rng),
+        )
+    else:
+        repository.execute(
+            "UPDATE locations SET address=? WHERE code=?",
+            (_random_address(rng), central_code),
+        )
 
     locations = []
     location_ids = []
@@ -71,6 +118,8 @@ def create_random_seed(application, days: int = 30, rng: random.Random | None = 
                 code,
                 f"Local {local_name}",
                 "LOCAL",
+                address=_random_address(rng),
+                cuit=_random_cuit(rng),
             )
         )
         locations.append(code)
@@ -97,6 +146,7 @@ def create_random_seed(application, days: int = 30, rng: random.Random | None = 
     supplier_id = service.create_supplier(
         f"SEED-{suffix}",
         f"Distribuidora {rng.choice(('Estrella', 'Central', 'Andina'))}",
+        address=_random_address(rng),
     )
     categories = list(CATEGORIES)
     for category in categories:
@@ -257,6 +307,7 @@ def create_random_seed(application, days: int = 30, rng: random.Random | None = 
                     location,
                     items,
                     {method: f"{payment_cents // 100}.{payment_cents % 100:02d}"},
+                    seller_name=rng.choice(SALESPERSON_NAMES),
                 )
                 sale_datetime = datetime.combine(
                     sale_day,

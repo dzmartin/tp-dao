@@ -19,7 +19,9 @@ class SeedTests(unittest.TestCase):
             self.assertTrue(
                 all(sku.startswith("SKU-") and len(sku) == 12 and sku[4:].isdigit() for sku in skus)
             )
-            locations = application.repository.all("SELECT name FROM locations WHERE type='LOCAL'")
+            locations = application.repository.all(
+                "SELECT name,address,cuit FROM locations WHERE type='LOCAL'"
+            )
             self.assertEqual(len({location["name"] for location in locations}), 2)
             self.assertTrue(
                 all(
@@ -27,6 +29,32 @@ class SeedTests(unittest.TestCase):
                     for location in locations
                 )
             )
+            self.assertTrue(all(location["address"] for location in locations))
+            self.assertTrue(
+                all(
+                    len(location["cuit"]) == 13
+                    and location["cuit"][2] == "-"
+                    and location["cuit"][11] == "-"
+                    and location["cuit"].replace("-", "").isdigit()
+                    for location in locations
+                )
+            )
+            for location in locations:
+                cuit_digits = location["cuit"].replace("-", "")
+                checksum = sum(
+                    int(digit) * weight
+                    for digit, weight in zip(cuit_digits[:10], (5, 4, 3, 2, 7, 6, 5, 4, 3, 2))
+                )
+                expected_check_digit = 11 - checksum % 11
+                if expected_check_digit == 11:
+                    expected_check_digit = 0
+                elif expected_check_digit == 10:
+                    expected_check_digit = 9
+                self.assertEqual(int(cuit_digits[-1]), expected_check_digit)
+            central = application.repository.one(
+                "SELECT address FROM locations WHERE type='CD'"
+            )
+            self.assertTrue(central["address"])
             products = application.repository.all("SELECT name,category FROM products")
             self.assertEqual(len({product["name"] for product in products}), 15)
             category_names = {
@@ -34,10 +62,10 @@ class SeedTests(unittest.TestCase):
             }
             self.assertEqual(category_names, {"Almacén", "Bebidas", "Limpieza", "Snacks"})
             self.assertTrue(all(product["category"] in category_names for product in products))
-            supplier_names = {
-                row["name"] for row in application.repository.all("SELECT name FROM suppliers")
-            }
+            suppliers = application.repository.all("SELECT name,address FROM suppliers")
+            supplier_names = {row["name"] for row in suppliers}
             self.assertEqual(len(supplier_names), 1)
+            self.assertTrue(all(supplier["address"] for supplier in suppliers))
             self.assertIn(
                 supplier_names.pop(),
                 {"Distribuidora Estrella", "Distribuidora Central", "Distribuidora Andina"},
@@ -45,6 +73,12 @@ class SeedTests(unittest.TestCase):
             self.assertEqual(len(result["locations"]), 2)
             self.assertGreaterEqual(result["sales"], 4)
             self.assertLessEqual(result["sales"], 12)
+            self.assertTrue(
+                all(
+                    row["seller_name"]
+                    for row in application.repository.all("SELECT seller_name FROM sales")
+                )
+            )
             sold_at = [
                 datetime.fromisoformat(row["sold_at"])
                 for row in application.repository.all("SELECT sold_at FROM sales")

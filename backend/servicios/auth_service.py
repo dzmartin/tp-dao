@@ -350,6 +350,18 @@ class AuthService:
             self.repository.execute("UPDATE app_users SET active=0 WHERE id=?", (user_id,))
             self.repository.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
 
+    def activate_user(self, user_id: int) -> None:
+        with self.repository.transaction():
+            user = self.repository.one(
+                "SELECT id,active FROM app_users WHERE id=?",
+                (user_id,),
+            )
+            if not user:
+                raise BusinessRuleError("La cuenta no existe.")
+            if user["active"]:
+                raise BusinessRuleError("La cuenta ya está activa.")
+            self.repository.execute("UPDATE app_users SET active=1 WHERE id=?", (user_id,))
+
     def _public_user(self, row) -> dict:
         user = {
             "id": row["id"],

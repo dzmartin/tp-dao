@@ -1,4 +1,4 @@
-const state = { data: null, user: null, currentView: "inicio", setupRequired: false, authLocations: [], demoShortcuts: [], editingCategoryId: null };
+const state = { data: null, user: null, currentView: "inicio", setupRequired: false, authLocations: [], demoShortcuts: [], editingCategoryId: null, editingOrderId: null };
 const currency = new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 2 });
 const dateTime = new Intl.DateTimeFormat("es-AR", { dateStyle: "short", timeStyle: "short" });
 const shortDate = new Intl.DateTimeFormat("es-AR", { dateStyle: "short" });
@@ -314,7 +314,7 @@ function addItemRow(container, selectedSku = "") {
 function packageOrderLines(order) {
   const packedBySku = new Map();
   for (const packageItem of state.data.packages) {
-    if (packageItem.status === "Rechazado") continue;
+    if (["Rechazado", "Cancelado"].includes(packageItem.status)) continue;
     const allocations = packageItem.order_lines || (
       packageItem.order_id === order.id
         ? packageItem.lines.map((line) => ({ ...line, order_id: packageItem.order_id }))
@@ -865,8 +865,48 @@ function renderInventory() {
   const rows = state.data.stock.filter((item) => !filter || item.location_code === filter);
   document.querySelector("#stock-table").innerHTML = rows.map((item) => `<tr><td>${escapeHtml(locationName(item.location_code))}</td><td>${escapeHtml(item.name)}</td><td class="${item.quantity <= item.minimum_stock ? "stock-low" : ""}">${item.quantity}</td><td>${item.minimum_stock}</td><td>${money(item.quantity * item.cost_cents)}</td></tr>`).join("") || emptyRow(5, "No hay existencias para mostrar.");
   updateMinimumStockSuggestion();
-  document.querySelector("#orders-table").innerHTML = state.data.orders.map((order) => `<tr><td><strong>${escapeHtml(order.batch_code || order.code)}</strong><br><small>${escapeHtml(order.code)}</small></td><td>${escapeHtml(locationName(order.origin_code))}</td><td>${escapeHtml(locationName(order.destination_code))}</td><td>${order.lines.map((line) => `${escapeHtml(line.name || productName(line.sku))} × ${line.quantity}`).join(", ")}</td><td><span class="status-pill" data-status="${escapeHtml(order.status)}">${escapeHtml(order.status)}</span></td><td>${shortDate.format(new Date(order.created_at))}</td></tr>`).join("") || emptyRow(6, "Todavía no hay órdenes de reposición.");
+  document.querySelector("#orders-table").innerHTML = state.data.orders.map((order) => `<tr><td><strong>${escapeHtml(order.batch_code || order.code)}</strong><br><small>${escapeHtml(order.code)}</small></td><td>${escapeHtml(locationName(order.origin_code))}</td><td>${escapeHtml(locationName(order.destination_code))}</td><td>${order.lines.map((line) => `${escapeHtml(line.name || productName(line.sku))} × ${line.quantity}`).join(", ")}</td><td><span class="status-pill" data-status="${escapeHtml(order.status)}">${escapeHtml(order.status)}</span></td><td>${shortDate.format(new Date(order.created_at))}</td><td>${state.user.role === "LOCAL" && order.destination_code === state.user.location_code && order.status === "Abierta" ? `<button class="small-action" data-order-action="edit" data-order-id="${order.id}">Modificar</button>` : ""}</td></tr>`).join("") || emptyRow(7, "Todavía no hay órdenes de reposición.");
   renderInventoryCounts();
+}
+
+function beginOrderEdit(orderId) {
+  const order = state.data.orders.find((item) => item.id === Number(orderId));
+  if (
+    !order
+    || order.status !== "Abierta"
+    || state.user.role !== "LOCAL"
+    || order.destination_code !== state.user.location_code
+  ) {
+    toast("Solo podés modificar órdenes abiertas de tu sucursal.", true);
+    return;
+  }
+  const form = document.querySelector("#order-form");
+  state.editingOrderId = order.id;
+  document.querySelector("#order-form h2").textContent = `Modificar orden ${order.code}`;
+  form.querySelector('[type="submit"]').textContent = "Guardar cambios";
+  document.querySelector("#cancel-order-edit").hidden = false;
+  document.querySelector(".minimum-stock-suggestion").hidden = true;
+  const container = document.querySelector("#order-items");
+  container.replaceChildren();
+  for (const line of order.lines) {
+    const row = addOrderItemRow(container, line.sku, line.quantity);
+    row.querySelector('[name="destination_code"]').value = order.destination_code;
+    row.querySelector('[name="destination_code"]').disabled = true;
+  }
+  form.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function cancelOrderEdit() {
+  const form = document.querySelector("#order-form");
+  state.editingOrderId = null;
+  form.reset();
+  document.querySelector("#order-form h2").textContent = "Solicitar reposición";
+  form.querySelector('[type="submit"]').textContent = "Enviar solicitud";
+  document.querySelector("#cancel-order-edit").hidden = true;
+  document.querySelector(".minimum-stock-suggestion").hidden = false;
+  const container = document.querySelector("#order-items");
+  container.replaceChildren();
+  addOrderItemRow(container);
 }
 
 function renderPurchases() {
@@ -921,8 +961,8 @@ async function receivePurchaseOrder(orderId) {
 }
 
 function packageActionButtons(item) {
-  if (state.user.role === "CD" && item.status === "Preparado") return `<button class="small-action" data-package-action="seal" data-code="${escapeHtml(item.code)}">Precintar</button>`;
-  if (state.user.role === "CD" && item.status === "Precintado") return `<button class="small-action" data-package-action="dispatch" data-code="${escapeHtml(item.code)}">Despachar</button>`;
+  if (state.user.role === "CD" && item.status === "Preparado") return `<button class="small-action" data-package-action="seal" data-code="${escapeHtml(item.code)}">Precintar</button> <button class="small-action danger" data-package-action="cancel" data-code="${escapeHtml(item.code)}">Cancelar</button>`;
+  if (state.user.role === "CD" && item.status === "Precintado") return `<button class="small-action" data-package-action="dispatch" data-code="${escapeHtml(item.code)}">Despachar</button> <button class="small-action danger" data-package-action="cancel" data-code="${escapeHtml(item.code)}">Cancelar</button>`;
   if (state.user.role === "LOCAL" && item.status === "En tránsito") return `<button class="small-action" data-package-action="receive" data-code="${escapeHtml(item.code)}">Registrar recepción</button>`;
   if (state.user.role === "LOCAL" && item.status === "Recibido") return `<button class="small-action" data-package-action="verify" data-code="${escapeHtml(item.code)}">Verificar y liberar</button>`;
   return "";
@@ -976,9 +1016,11 @@ function renderRejectedPackages() {
 }
 
 function packageTimeline(item) {
-  const steps = item.status === "Rechazado"
-    ? ["Preparado", "Precintado", "En tránsito", "Recibido", "Rechazado"]
-    : ["Preparado", "Precintado", "En tránsito", "Recibido", "Verificado"];
+  const steps = item.status === "Cancelado"
+    ? ["Preparado", ...(item.events.some((event) => event.state === "Precintado") ? ["Precintado"] : []), "Cancelado"]
+    : item.status === "Rechazado"
+      ? ["Preparado", "Precintado", "En tránsito", "Recibido", "Rechazado"]
+      : ["Preparado", "Precintado", "En tránsito", "Recibido", "Verificado"];
   const currentIndex = steps.indexOf(item.status);
   const eventsByState = new Map(item.events.map((event) => [event.state, event]));
   return `<ol class="package-timeline" aria-label="Historial de estados del bulto">${steps.map((step, index) => {
@@ -990,6 +1032,8 @@ function packageTimeline(item) {
     const isCurrent = index === currentIndex;
     const className = step === "Rechazado" && isCurrent
       ? "timeline-step timeline-rejected"
+      : step === "Cancelado" && isCurrent
+        ? "timeline-step timeline-cancelled"
       : `timeline-step ${index < currentIndex ? "timeline-completed" : isCurrent ? "timeline-current" : "timeline-pending"}`;
     return `<li class="${className}"><strong>${escapeHtml(step)}</strong>${event ? `<p>${escapeHtml(event.detail)}</p><time datetime="${escapeHtml(event.occurred_at)}">${dateTime.format(new Date(event.occurred_at))}</time>${elapsed ? `<small class="timeline-duration">${escapeHtml(elapsed)} desde el estado anterior</small>` : ""}` : ""}</li>`;
   }).join("")}</ol>`;
@@ -1021,7 +1065,7 @@ function renderUsers() {
     <td>${user.active ? "Activa" : "Desactivada"}</td>
     <td>${user.active
       ? `<button class="small-action" data-user-action="reset" data-user-id="${user.id}">Cambiar contraseña</button>${user.id === state.data.user.id ? "" : ` <button class="small-action" data-user-action="delete" data-user-id="${user.id}">Desactivar</button>`}`
-      : ""}</td>
+      : `<button class="small-action" data-user-action="activate" data-user-id="${user.id}">Reactivar</button>`}</td>
   </tr>`).join("") || emptyRow(5, "Todavía no hay otras cuentas.");
 }
 
@@ -1049,12 +1093,22 @@ function showReceipt(receipt) {
     ? `<div class="receipt-adjustment"><span>${adjustmentLabel}</span><strong>${money(adjustment)}</strong></div>`
     : "";
   const payments = sale.payments.map((payment) => `<li><span>${escapeHtml(payment.method)}</span><strong>${money(payment.amount_cents)}</strong></li>`).join("");
+  const receiptDetails = [
+    sale.location_address && ["Domicilio del local", sale.location_address],
+    sale.location_cuit && ["CUIT del local", sale.location_cuit],
+    sale.seller_name && ["Vendedor/a", sale.seller_name],
+    sale.distribution_center_address && ["Domicilio del centro de distribución", sale.distribution_center_address],
+  ].filter(Boolean).map(([label, value]) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join("");
+  const suppliers = sale.suppliers.map((supplier) => `
+    <li><strong>${escapeHtml(supplier.name)}</strong><span>${escapeHtml(supplier.address || "Domicilio no informado")}</span></li>
+  `).join("");
   document.querySelector("#receipt-paper").innerHTML = `
     <header class="receipt-heading">
       <div class="receipt-business">
         <strong>La pulga mercado</strong>
         <span>${escapeHtml(sale.location_name)}</span>
       </div>
+      ${receiptDetails ? `<div class="receipt-business-details">${receiptDetails}</div>` : ""}
       <div class="receipt-title-row">
         <h2 id="receipt-title">Comprobante de venta</h2>
         <strong class="receipt-number">N.º ${escapeHtml(sale.receipt)}</strong>
@@ -1071,6 +1125,7 @@ function showReceipt(receipt) {
       ${adjustmentLine}
       <div class="receipt-grand-total"><span>Total</span><strong>${money(sale.total_cents)}</strong></div>
     </section>
+    ${suppliers ? `<section class="receipt-providers"><h3>Proveedores de los productos</h3><ul>${suppliers}</ul></section>` : ""}
     <section class="receipt-payments"><h3>Pagado con</h3><ul>${payments}</ul></section>
     <p class="receipt-thanks">Gracias por su compra</p>
     <footer class="receipt-actions"><button class="button button-dark" type="button" data-download-receipt="${escapeHtml(sale.receipt)}">Descargar PDF</button><button class="close-button" type="button" data-print-receipt>Imprimir</button><button class="close-button" type="button" data-close-receipt>Cerrar</button></footer>
@@ -1370,7 +1425,10 @@ async function handlePackageAction(button) {
   const { packageAction: action, code } = button.dataset;
   try {
     let result;
-    if (action === "seal") {
+    if (action === "cancel") {
+      if (!window.confirm(`¿Cancelar el bulto ${code}? Se recalcularán las cantidades pendientes de las órdenes.`)) return;
+      result = await api(`/api/packages/${encodeURIComponent(code)}/cancel`, { method: "POST", body: "{}" });
+    } else if (action === "seal") {
       const seal = window.prompt(`Ingresá el precinto para ${code}:`);
       if (seal === null) return;
       result = await api(`/api/packages/${encodeURIComponent(code)}/seal`, { method: "POST", body: JSON.stringify({ seal }) });
@@ -1643,8 +1701,25 @@ function bindForms() {
   });
   document.querySelector("#order-form").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
+    const submitButton = form.querySelector('[type="submit"]');
     try {
       const destinations = consolidatedOrderDestinations();
+      if (state.editingOrderId) {
+        if (destinations.length !== 1 || destinations[0].destination_code !== state.user.location_code) {
+          throw new Error("La orden solo puede incluir productos de tu sucursal.");
+        }
+        const orderId = state.editingOrderId;
+        submitButton.disabled = true;
+        const response = await api(`/api/orders/${orderId}/update`, {
+          method: "POST",
+          body: JSON.stringify({ items: destinations[0].items }),
+        });
+        await refreshData();
+        cancelOrderEdit();
+        toast(response.result);
+        return;
+      }
       const response = await submitForm(
         event.currentTarget,
         "/api/replenishment-batches",
@@ -1653,6 +1728,7 @@ function bindForms() {
       );
       if (response) { document.querySelector("#order-items").replaceChildren(); addOrderItemRow(document.querySelector("#order-items")); }
     } catch (error) { toast(error.message, true); }
+    finally { submitButton.disabled = false; }
   });
   document.querySelector("#package-destination").addEventListener("change", (event) => {
     selectPackageDestination(event.currentTarget.value);
@@ -1705,6 +1781,22 @@ function bindForms() {
   document.querySelector("#report-form").addEventListener("submit", (event) => {
     event.preventDefault();
     loadReports();
+  });
+  document.querySelector("#download-reports-pdf").addEventListener("click", () => {
+    const form = document.querySelector("#report-form");
+    if (!form.reportValidity()) return;
+    const values = formObject(form);
+    const query = new URLSearchParams({
+      start: values.start,
+      end: values.end,
+      location: values.location || "",
+    });
+    const link = document.createElement("a");
+    link.href = `/api/reports/summary.pdf?${query}`;
+    link.download = `resumen-reportes-${values.start}-${values.end}.pdf`;
+    document.body.append(link);
+    link.click();
+    link.remove();
   });
   document.querySelector("#close-return").addEventListener("click", () => document.querySelector("#return-dialog").close());
   document.querySelector("#refresh-button").addEventListener("click", async () => {
@@ -1812,6 +1904,10 @@ function bindForms() {
         toast(userId === state.data.user.id
           ? "Contraseña de tu cuenta actualizada."
           : "Contraseña actualizada; la cuenta deberá iniciar sesión nuevamente.");
+      } else if (button.dataset.userAction === "activate") {
+        await api(`/api/users/${userId}/activate`, { method: "POST", body: "{}" });
+        await refreshData();
+        toast("Cuenta reactivada.");
       } else {
         if (!window.confirm("¿Desactivar esta cuenta?")) return;
         await api(`/api/users/${userId}/delete`, { method: "POST", body: "{}" });
@@ -1853,7 +1949,10 @@ function bindForms() {
   });
   document.querySelectorAll("[data-add-row]").forEach((button) => button.addEventListener("click", () => {
     const container = document.getElementById(button.dataset.addRow);
-    if (container.id === "order-items") addOrderItemRow(container);
+    if (container.id === "order-items") {
+      const row = addOrderItemRow(container);
+      if (state.editingOrderId) row.querySelector('[name="destination_code"]').disabled = true;
+    }
     else addItemRow(container);
   }));
   document.querySelector("#add-minimum-stock-items").addEventListener("click", addMinimumStockSuggestions);
@@ -1865,6 +1964,11 @@ function bindForms() {
     const button = event.target.closest("[data-package-action]");
     if (button) handlePackageAction(button);
   });
+  document.querySelector("#orders-table").addEventListener("click", (event) => {
+    const button = event.target.closest('[data-order-action="edit"]');
+    if (button) beginOrderEdit(button.dataset.orderId);
+  });
+  document.querySelector("#cancel-order-edit").addEventListener("click", cancelOrderEdit);
   document.querySelector("#rejected-packages-list").addEventListener("click", (event) => {
     const button = event.target.closest("[data-rejected-disposition]");
     if (button) handleRejectedPackageDisposition(button);

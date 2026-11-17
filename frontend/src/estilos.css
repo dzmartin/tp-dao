@@ -156,6 +156,7 @@ input::placeholder { color: #b0bab3; }
 .remove-row { padding: 5px 2px; border: 0; background: transparent; color: #9a6254; font-size: 9px; }
 .remove-row:hover { color: #a53325; }
 .package-form { margin-bottom: 14px; padding: 0 18px 17px; }
+.order-form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .package-form-title { display: flex; min-height: 75px; align-items: center; justify-content: space-between; gap: 14px; }
 .package-form-title h2 { margin-bottom: 0; }
 .notice-tag { padding: 7px 9px; border-radius: 3px; background: #f0f4df; color: #5f7045; font-size: 9px; font-weight: 700; }
@@ -202,6 +203,7 @@ input::placeholder { color: #b0bab3; }
 .status-pill[data-status="Rechazado"] { background: #fae9e4; color: #a34838; }
 .status-pill[data-status="En tránsito"] { background: #fff0e4; color: #986344; }
 .status-pill[data-status="Recibido"] { background: #e8edf7; color: #516182; }
+.status-pill[data-status="Cancelado"] { background: #e8ebe8; color: #647066; }
 .package-timeline { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); grid-column: 1 / -1; margin: 4px 0 0; padding: 17px 0 0; list-style: none; }
 .timeline-step { position: relative; min-width: 0; min-height: 34px; padding: 13px 12px 0 0; border-top: 2px solid #dfe5df; color: var(--muted); font-size: 10px; }
 .timeline-step:last-child { border-top-color: transparent; }
@@ -214,6 +216,9 @@ input::placeholder { color: #b0bab3; }
 .timeline-rejected { border-top-color: #b34e3d; color: var(--ink); }
 .timeline-rejected::before { top: -8px; left: -2px; width: 14px; height: 14px; border: 3px solid white; background: #b34e3d; box-shadow: 0 0 0 2px #b34e3d; }
 .timeline-rejected > strong { color: #a34838; }
+.timeline-cancelled { border-top-color: #9aa49c; color: var(--ink); }
+.timeline-cancelled::before { background: #7f8981; }
+.timeline-cancelled > strong { color: #69736b; }
 .timeline-step p { margin: 4px 0; color: #56645c; font-size: 10px; line-height: 1.5; }
 .timeline-step time { color: var(--muted); font-size: 9px; }
 .timeline-duration { display: block; margin-top: 3px; color: #526b5c; font-size: 8px; }
@@ -239,7 +244,7 @@ input::placeholder { color: #b0bab3; }
 .receipt-code { color: #3b6850; font: 700 10px 'Manrope', sans-serif; }
 .return-button { padding: 6px 8px; border: 1px solid #dbe2dc; border-radius: 3px; background: white; color: #446753; font-size: 9px; font-weight: 700; white-space: nowrap; }
 .return-button:hover { background: rgba(255, 0, 0, 0.3); }
-.report-controls { display: flex; align-items: end; gap: 10px; margin-bottom: 13px; padding: 14px 17px; }
+.report-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-bottom: 13px; padding: 14px 17px; }
 .report-controls label { width: 170px; }
 .report-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 13px; }
 .report-panel { min-height: 190px; overflow: hidden; }
@@ -296,6 +301,12 @@ input::placeholder { color: #b0bab3; }
 .receipt-business { display: grid; gap: 4px; padding-bottom: 15px; border-bottom: 1px solid var(--line); }
 .receipt-business strong { font: 700 17px 'Manrope', sans-serif; }
 .receipt-business span, .receipt-date { color: var(--muted); font-size: 11px; }
+.receipt-business-details { display: grid; gap: 4px; color: var(--ink-soft); font-size: 10px; }
+.receipt-providers { padding-top: 10px; border-top: 1px solid var(--line); }
+.receipt-providers h3 { margin: 0 0 7px; font-size: 11px; }
+.receipt-providers ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; font-size: 10px; }
+.receipt-providers li { display: grid; gap: 3px; }
+.receipt-providers li span { color: var(--muted); }
 .receipt-title-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 10px; padding-top: 4px; }
 .receipt-title-row h2 { font-size: 23px; }
 .receipt-number { color: var(--ink); font: 700 15px 'Manrope', sans-serif; }

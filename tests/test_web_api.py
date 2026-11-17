@@ -2,6 +2,7 @@ import json
 import random
 import re
 import unittest
+from datetime import date
 from http.server import HTTPServer
 from threading import Thread
 from urllib.error import HTTPError
@@ -79,6 +80,57 @@ class WebApiTests(unittest.TestCase):
         self.application.auth.create_user("admin", "clave-segura-admin", "ADMIN", None)
         self.login("admin", "clave-segura-admin")
 
+    def test_local_can_download_report_summary_with_requester_and_own_location_details(self):
+        self.initialize_accounts()
+        self.application.retail.create_location(
+            "L02", "Local Norte", "LOCAL", "Calle Norte 456", "30-22222222-2"
+        )
+        with self.application.repository.transaction():
+            self.application.repository.execute(
+                "UPDATE locations SET address=?,cuit=? WHERE code='L01'",
+                ("Calle Principal 123", "30-11111111-1"),
+            )
+        service = self.application.retail
+        product_id = service.create_product(
+            "SKU-PDF", "Producto PDF", "General", "1.00", "2.00", 0
+        )
+        local_id = self.application.repository.one(
+            "SELECT id FROM locations WHERE code='L01'"
+        )["id"]
+        with self.application.repository.transaction():
+            self.application.repository.execute(
+                "INSERT INTO stock(location_id,product_id,quantity) VALUES(?,?,?)",
+                (local_id, product_id, 3),
+            )
+        service.sell("L01", {"SKU-PDF": 1}, {"transferencia": "2.00"}, "local01")
+
+        self.login("local01", "clave-segura-local")
+        today = date.today().isoformat()
+        status, content = self.request(
+            f"/api/reports/summary.pdf?start={today}&end={today}&location=L02"
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(content.startswith(b"%PDF-1.4"))
+        self.assertIn(b"Solicitado por: local01", content)
+        self.assertIn(b"Generado el:", content)
+        self.assertIn(b"Local \\050L01\\051", content)
+        self.assertIn(b"Calle Principal 123", content)
+        self.assertIn(b"30-11111111-1", content)
+        self.assertIn(b"Producto PDF", content)
+        self.assertNotIn(b"Local Norte", content)
+        self.assertIn(b"%%EOF", content)
+
+    def test_report_summary_pdf_rejects_an_invalid_date_range(self):
+        self.initialize_accounts()
+
+        status, content = self.request(
+            "/api/reports/summary.pdf?start=2026-02-01&end=2026-01-01"
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("La fecha inicial", json.loads(content)["error"])
+
     def test_only_cd_can_resolve_rejected_packages(self):
         self.initialize_accounts()
         service = self.application.retail
@@ -107,6 +159,93 @@ class WebApiTests(unittest.TestCase):
             item for item in json.loads(bootstrap)["packages"] if item["code"] == "B-REJECT"
         )
         self.assertEqual(package["disposition"], "stock")
+
+    def test_only_cd_can_cancel_a_sealed_package_and_repack_its_order(self):
+        self.initialize_accounts()
+        service = self.application.retail
+        service.create_product("SKU-CANCEL", "Producto cancelable", "General", 4, 8, 0)
+        service.adjust_stock("CD", "SKU-CANCEL", 5, "compra")
+        order_id = service.create_replenishment("L01", {"SKU-CANCEL": 5})
+        service.pack(order_id, "B-CANCEL", "R-CANCEL", {"SKU-CANCEL": 3})
+        service.seal_package("B-CANCEL", "PREC-CANCEL")
+
+        self.login("local01", "clave-segura-local")
+        status, _ = self.post("/api/packages/B-CANCEL/cancel", {})
+        self.assertEqual(status, 403)
+
+        self.login("centro", "clave-segura-centro")
+        status, result = self.post("/api/packages/B-CANCEL/cancel", {})
+        self.assertEqual(status, 201, result)
+        self.assertIn("cantidades", result["result"])
+        self.assertEqual(
+            self.application.repository.one(
+                "SELECT status FROM replenishment_orders WHERE id=?", (order_id,)
+            )["status"],
+            "Abierta",
+        )
+        status, result = self.post(
+            "/api/packages",
+            {
+                "destination_code": "L01",
+                "code": "B-CANCEL-RETRY",
+                "dispatch_note": "R-CANCEL-RETRY",
+                "items": {"SKU-CANCEL": 5},
+            },
+        )
+        self.assertEqual(status, 201, result)
+
+    def test_local_can_edit_own_order_only_before_cd_prepares_it(self):
+        self.initialize_accounts()
+        service = self.application.retail
+        service.create_product("SKU-EDIT-A", "Producto A", "General", 1, 2, 0)
+        service.create_product("SKU-EDIT-B", "Producto B", "General", 1, 2, 0)
+        service.adjust_stock("CD", "SKU-EDIT-A", 10, "compra")
+        second_location = service.create_location("L02", "Local Norte", "LOCAL")
+        self.application.auth.create_user(
+            "local02",
+            "clave-segura-local02",
+            "LOCAL",
+            second_location,
+        )
+
+        self.login("local01", "clave-segura-local")
+        _, order = self.post(
+            "/api/orders",
+            {"destination_code": "L01", "items": {"SKU-EDIT-A": 5}},
+        )
+        order_id = order["result"]
+        self.login("local02", "clave-segura-local02")
+        other_store_status, _ = self.post(
+            f"/api/orders/{order_id}/update",
+            {"items": {"SKU-EDIT-A": 4}},
+        )
+        self.assertEqual(other_store_status, 403)
+
+        self.login("local01", "clave-segura-local")
+        update_status, update = self.post(
+            f"/api/orders/{order_id}/update",
+            {"items": {"SKU-EDIT-A": 3, "SKU-EDIT-B": 2}},
+        )
+        self.assertEqual(update_status, 201, update)
+        updated_lines = self.application.repository.all(
+            """SELECT p.sku,rl.quantity FROM replenishment_lines rl
+               JOIN products p ON p.id=rl.product_id WHERE rl.order_id=? ORDER BY p.sku""",
+            (order_id,),
+        )
+        self.assertEqual(
+            [(line["sku"], line["quantity"]) for line in updated_lines],
+            [("SKU-EDIT-A", 3), ("SKU-EDIT-B", 2)],
+        )
+
+        self.login("centro", "clave-segura-centro")
+        service.pack(order_id, "B-EDIT", "R-EDIT", {"SKU-EDIT-A": 1})
+        self.login("local01", "clave-segura-local")
+        prepared_status, prepared_error = self.post(
+            f"/api/orders/{order_id}/update",
+            {"items": {"SKU-EDIT-A": 2}},
+        )
+        self.assertEqual(prepared_status, 400)
+        self.assertIn("Solo se pueden modificar órdenes abiertas", prepared_error["error"])
 
     def login(self, username: str, password: str):
         status, result = self.post("/api/auth/login", {"username": username, "password": password})
@@ -206,6 +345,33 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(sale_status, 201)
         self.assertTrue(sale["result"].startswith("V-"))
+        with self.application.repository.transaction():
+            self.application.repository.execute(
+                "UPDATE locations SET address=?,cuit=? WHERE code='L01'",
+                ("Mitre 123, Rosario, Santa Fe", "30-12345678-9"),
+            )
+            self.application.repository.execute(
+                "UPDATE locations SET address=? WHERE code='CD'",
+                ("Rivadavia 456, Buenos Aires, Buenos Aires",),
+            )
+            self.application.repository.execute(
+                "UPDATE suppliers SET address=? WHERE id=?",
+                ("Belgrano 789, Córdoba, Córdoba", supplier["result"]),
+            )
+        _, bootstrap = self.request("/api/bootstrap")
+        sale_data = next(
+            item
+            for item in json.loads(bootstrap)["sales"]
+            if item["receipt"] == sale["result"]
+        )
+        self.assertEqual(sale_data["location_address"], "Mitre 123, Rosario, Santa Fe")
+        self.assertEqual(sale_data["location_cuit"], "30-12345678-9")
+        self.assertEqual(sale_data["seller_name"], "local01")
+        self.assertEqual(
+            sale_data["distribution_center_address"],
+            "Rivadavia 456, Buenos Aires, Buenos Aires",
+        )
+        self.assertEqual(sale_data["suppliers"][0]["address"], "Belgrano 789, Córdoba, Córdoba")
         pdf_status, pdf = self.request(f"/api/sales/{sale['result']}/receipt.pdf")
         self.assertEqual(pdf_status, 200)
         self.assertTrue(pdf.startswith(b"%PDF-1.4"))
@@ -218,6 +384,12 @@ class WebApiTests(unittest.TestCase):
         self.assertIn(sale["result"].encode("ascii"), pdf)
         self.assertIn(b"Producto", pdf)
         self.assertIn(b"Sucursal Local", pdf)
+        self.assertIn(b"Domicilio del local: Mitre 123, Rosario, Santa Fe", pdf)
+        self.assertIn(b"CUIT del local: 30-12345678-9", pdf)
+        self.assertIn(b"Vendedor/a: local01", pdf)
+        self.assertIn(b"Domicilio del centro de distribuci", pdf)
+        self.assertIn(b"Proveedor", pdf)
+        self.assertIn(b"Belgrano 789, C", pdf)
         self.assertIn(b"Subtotal", pdf)
         self.assertIn(b"$ 20,00", pdf)
         self.assertIn(b"$ 4,00", pdf)
@@ -518,6 +690,45 @@ class WebApiTests(unittest.TestCase):
             "SELECT code,name,type FROM locations WHERE type='CD'"
         )
         self.assertIsNotNone(central_location)
+
+    def test_deactivated_user_can_be_reactivated(self):
+        self.initialize_accounts()
+        location_id = self.application.repository.one(
+            "SELECT id FROM locations WHERE code='L01'"
+        )["id"]
+        create_status, created = self.post(
+            "/api/users",
+            {
+                "username": "local-reactivable",
+                "password": "clave-segura-reactivable",
+                "role": "LOCAL",
+                "location_id": location_id,
+            },
+        )
+        self.assertEqual(create_status, 201)
+        user_id = created["result"]
+
+        self.assertEqual(
+            self.post(f"/api/users/{user_id}/delete", {})[0],
+            201,
+        )
+        self.assertIsNone(
+            self.application.auth.authenticate("local-reactivable", "clave-segura-reactivable")
+        )
+
+        activate_status, activated = self.post(f"/api/users/{user_id}/activate", {})
+        self.assertEqual(activate_status, 201, activated)
+        self.assertEqual(activated["result"], "Cuenta reactivada.")
+        self.assertEqual(
+            self.application.auth.authenticate(
+                "local-reactivable", "clave-segura-reactivable"
+            )["role"],
+            "LOCAL",
+        )
+        self.assertEqual(
+            self.post(f"/api/users/{user_id}/activate", {})[0],
+            400,
+        )
 
     def test_authentication_and_role_scoping(self):
         status, response = self.request("/api/auth/status")

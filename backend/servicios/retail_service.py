@@ -3,6 +3,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from uuid import uuid4
 
 from backend.dominio.exceptions import BusinessRuleError, NotFoundError
+from backend.dominio.entities import PackageState
 from backend.persistencia.sqlite_repository import SQLiteRepository
 from backend.dominio.payment_strategies import PAYMENT_STRATEGIES
 from backend.dominio.sale_states import ConfirmedSaleState, sale_state_from_name
@@ -26,15 +27,22 @@ class RetailService:
     def __init__(self, repository: SQLiteRepository) -> None:
         self.repository = repository
 
-    def create_location(self, code: str, name: str, location_type: str) -> int:
+    def create_location(
+        self,
+        code: str,
+        name: str,
+        location_type: str,
+        address: str = "",
+        cuit: str = "",
+    ) -> int:
         if location_type not in ("CD", "LOCAL"):
             raise BusinessRuleError("El tipo de ubicación debe ser CD o LOCAL.")
         with self.repository.transaction():
             if location_type == "CD" and self.repository.one("SELECT id FROM locations WHERE type='CD'"):
                 raise BusinessRuleError("Ya existe un Centro de Distribución central.")
             cursor = self.repository.execute(
-                "INSERT INTO locations(code,name,type) VALUES(?,?,?)",
-                (code.strip(), name.strip(), location_type),
+                "INSERT INTO locations(code,name,type,address,cuit) VALUES(?,?,?,?,?)",
+                (code.strip(), name.strip(), location_type, address.strip(), cuit.strip()),
             )
             return cursor.lastrowid
 
@@ -96,11 +104,18 @@ class RetailService:
                 raise BusinessRuleError("No se puede eliminar el Centro de Distribución central.")
             self.repository.execute("DELETE FROM locations WHERE id=?", (location_id,))
 
-    def create_supplier(self, tax_id: str, name: str, phone: str = "", email: str = "") -> int:
+    def create_supplier(
+        self,
+        tax_id: str,
+        name: str,
+        phone: str = "",
+        email: str = "",
+        address: str = "",
+    ) -> int:
         with self.repository.transaction():
             cursor = self.repository.execute(
-                "INSERT INTO suppliers(tax_id,name,phone,email) VALUES(?,?,?,?)",
-                (tax_id.strip(), name.strip(), phone.strip(), email.strip()),
+                "INSERT INTO suppliers(tax_id,name,phone,email,address) VALUES(?,?,?,?,?)",
+                (tax_id.strip(), name.strip(), phone.strip(), email.strip(), address.strip()),
             )
             return cursor.lastrowid
 
@@ -472,6 +487,37 @@ class RetailService:
                 self.repository.execute("INSERT INTO replenishment_lines VALUES(?,?,?)", (order_id, product["id"], quantity))
             return order_id
 
+    def update_replenishment_order(self, order_id: int, quantities: dict[str, int]) -> None:
+        if not quantities or any(quantity <= 0 for quantity in quantities.values()):
+            raise BusinessRuleError("La orden debe incluir cantidades positivas.")
+        with self.repository.transaction():
+            order = _require(
+                self.repository.one(
+                    "SELECT id,status FROM replenishment_orders WHERE id=?",
+                    (order_id,),
+                ),
+                "Orden de reposición inexistente.",
+            )
+            if order["status"] != "Abierta":
+                raise BusinessRuleError(
+                    "Solo se pueden modificar órdenes abiertas, antes de que el CD comience a prepararlas."
+                )
+            products = {}
+            for sku in quantities:
+                products[sku] = _require(
+                    self.repository.one("SELECT id FROM products WHERE sku=?", (sku,)),
+                    f"Producto {sku} inexistente.",
+                )
+            self.repository.execute(
+                "DELETE FROM replenishment_lines WHERE order_id=?",
+                (order_id,),
+            )
+            for sku, quantity in quantities.items():
+                self.repository.execute(
+                    "INSERT INTO replenishment_lines(order_id,product_id,quantity) VALUES(?,?,?)",
+                    (order_id, products[sku]["id"], quantity),
+                )
+
     def create_consolidated_replenishment(self, destinations: list[dict]) -> int:
         if not destinations:
             raise BusinessRuleError("La orden consolidada debe incluir al menos un local.")
@@ -590,7 +636,7 @@ class RetailService:
                 pending_by_order[order["id"]] = {}
                 requested_lines = self.repository.all(
                     """SELECT rl.product_id,rl.quantity,
-                              COALESCE(SUM(CASE WHEN p.status<>'Rechazado'
+                              COALESCE(SUM(CASE WHEN p.status NOT IN ('Rechazado','Cancelado')
                                                 THEN pol.quantity ELSE 0 END),0) AS packed
                        FROM replenishment_lines rl
                        LEFT JOIN package_order_lines pol
@@ -715,7 +761,8 @@ class RetailService:
                 already_packed = self.repository.one(
                     """SELECT COALESCE(SUM(pol.quantity),0) AS quantity
                        FROM package_order_lines pol JOIN packages p ON p.id=pol.package_id
-                       WHERE pol.order_id=? AND p.status<>'Rechazado' AND pol.product_id=?""",
+                       WHERE pol.order_id=? AND p.status NOT IN ('Rechazado','Cancelado')
+                         AND pol.product_id=?""",
                     (order_id, product["id"]),
                 )["quantity"]
                 if already_packed + quantity > requested["quantity"]:
@@ -795,6 +842,72 @@ class RetailService:
             self._event(
                 package["id"], "Precintado", f"Precinto {seal.strip()} asignado.", occurred_at
             )
+
+    def cancel_package(
+        self, package_code: str, occurred_at: str | None = None
+    ) -> None:
+        with self.repository.transaction():
+            package = _require(
+                self.repository.one("SELECT * FROM packages WHERE code=?", (package_code,)),
+                "Bulto inexistente.",
+            )
+            if package["status"] not in (PackageState.PREPARED, PackageState.SEALED):
+                raise BusinessRuleError(
+                    "Solo se pueden cancelar bultos preparados o precintados, antes del despacho."
+                )
+
+            order_ids = self._package_order_ids(package["id"], package["order_id"])
+            self.repository.execute(
+                "UPDATE packages SET status=? WHERE id=?",
+                (PackageState.CANCELLED, package["id"]),
+            )
+            self._event(
+                package["id"],
+                PackageState.CANCELLED,
+                "Bulto cancelado antes del despacho.",
+                occurred_at,
+            )
+
+            for order_id in order_ids:
+                pending = self.repository.one(
+                    """SELECT COALESCE(SUM(MAX(rl.quantity-COALESCE(packed.quantity,0),0)),0)
+                              AS quantity
+                       FROM replenishment_lines rl
+                       LEFT JOIN (
+                           SELECT pol.order_id,pol.product_id,SUM(pol.quantity) AS quantity
+                           FROM package_order_lines pol
+                           JOIN packages p ON p.id=pol.package_id
+                           WHERE p.status NOT IN ('Rechazado','Cancelado')
+                           GROUP BY pol.order_id,pol.product_id
+                       ) packed ON packed.order_id=rl.order_id AND packed.product_id=rl.product_id
+                       WHERE rl.order_id=?""",
+                    (order_id,),
+                )["quantity"]
+                if pending <= 0:
+                    continue
+                rejected = self.repository.one(
+                    """SELECT EXISTS(
+                           SELECT 1 FROM package_orders po JOIN packages p ON p.id=po.package_id
+                           WHERE po.order_id=? AND p.status='Rechazado'
+                       ) AS value""",
+                    (order_id,),
+                )["value"]
+                other_packages = self.repository.one(
+                    """SELECT EXISTS(
+                           SELECT 1 FROM package_orders po JOIN packages p ON p.id=po.package_id
+                           WHERE po.order_id=? AND p.status NOT IN ('Rechazado','Cancelado')
+                       ) AS value""",
+                    (order_id,),
+                )["value"]
+                order_status = (
+                    "Con rechazo" if rejected
+                    else "Preparando" if other_packages
+                    else "Abierta"
+                )
+                self.repository.execute(
+                    "UPDATE replenishment_orders SET status=? WHERE id=?",
+                    (order_status, order_id),
+                )
 
     def dispatch(self, package_code: str, occurred_at: str | None = None) -> None:
         with self.repository.transaction():
@@ -954,6 +1067,7 @@ class RetailService:
         location_code: str,
         items: dict[str, int],
         payments: dict[str, int | float | str | Decimal],
+        seller_name: str = "",
     ) -> str:
         if not items or any(quantity <= 0 for quantity in items.values()):
             raise BusinessRuleError("La venta debe incluir cantidades positivas.")
@@ -1031,9 +1145,16 @@ class RetailService:
             adjusted_total = other_payments + cash_due
             receipt = f"V-{uuid4().hex[:12].upper()}"
             sale = self.repository.execute(
-                """INSERT INTO sales(receipt,location_id,sold_at,total_cents,state)
-                   VALUES(?,?,?,?,?)""",
-                (receipt, location["id"], _now(), adjusted_total, ConfirmedSaleState.name),
+                """INSERT INTO sales(receipt,location_id,sold_at,total_cents,state,seller_name)
+                   VALUES(?,?,?,?,?,?)""",
+                (
+                    receipt,
+                    location["id"],
+                    _now(),
+                    adjusted_total,
+                    ConfirmedSaleState.name,
+                    seller_name.strip(),
+                ),
             )
             for product, quantity, unit_price in prepared:
                 self.repository.execute(

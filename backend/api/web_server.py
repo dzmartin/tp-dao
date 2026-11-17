@@ -8,25 +8,14 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from backend.api.pdf_utils import build_pdf, pdf_money, pdf_text
+from backend.api.report_pdf import report_summary_pdf
 from backend.container import create_application
 from backend.dominio.exceptions import BusinessRuleError
 
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB_ROOT = ROOT / "frontend"
-
-
-def _pdf_text(value: object) -> str:
-    encoded = str(value).encode("cp1252", errors="replace")
-    return "".join(
-        f"\\{byte:03o}" if byte < 32 or byte > 126 or byte in (40, 41, 92) else chr(byte)
-        for byte in encoded
-    )
-
-
-def _pdf_money(cents: int) -> str:
-    whole, fraction = divmod(cents, 100)
-    return f"$ {whole:,}".replace(",", ".") + f",{fraction:02d}"
 
 
 def _receipt_pdf(sale: dict, lines: list[dict], payments: list[dict]) -> bytes:
@@ -40,7 +29,7 @@ def _receipt_pdf(sale: dict, lines: list[dict], payments: list[dict]) -> bytes:
     ) -> None:
         baseline = y if baseline is None else baseline
         font = "F2" if bold else "F1"
-        commands.append(f"BT /{font} {size} Tf {x} {baseline} Td ({_pdf_text(value)}) Tj ET")
+        commands.append(f"BT /{font} {size} Tf {x} {baseline} Td ({pdf_text(value)}) Tj ET")
 
     def right_text(value: object, right: int, baseline: int, size: int = 10, bold: bool = False) -> None:
         rendered = str(value)
@@ -59,28 +48,6 @@ def _receipt_pdf(sale: dict, lines: list[dict], payments: list[dict]) -> bytes:
         right_text("Precio", 455, baseline, 10, True)
         right_text("Importe", 540, baseline, 10, True)
         y -= 31
-
-    def new_page(include_table_heading: bool = True) -> None:
-        nonlocal commands, y
-        if commands:
-            pages.append("\n".join(commands).encode("ascii"))
-        commands = []
-        y = 794
-        text("FARO | OPERACIONES COMERCIALES", size=11, bold=True)
-        text(f"Sucursal {sale['location_name']} · {sale['location_code']}", baseline=y - 18, size=9)
-        y -= 48
-        text("COMPROBANTE DE VENTA", size=8, bold=True)
-        y -= 26
-        text("Comprobante de venta", size=19, bold=True)
-        right_text(f"Nº {sale['receipt']}", 547, y, 12, True)
-        y -= 28
-        sold_at = datetime.fromisoformat(sale["sold_at"]).astimezone().strftime("%d/%m/%Y %H:%M")
-        text(f"Fecha: {sold_at}", size=10)
-        y -= 18
-        text(f"Estado: {sale['state']}", size=9)
-        y -= 11
-        if include_table_heading:
-            table_heading()
 
     def wrap(value: str, max_chars: int) -> list[str]:
         words = value.split()
@@ -102,6 +69,40 @@ def _receipt_pdf(sale: dict, lines: list[dict], payments: list[dict]) -> bytes:
             wrapped.append(current)
         return wrapped or [""]
 
+    def new_page(include_table_heading: bool = True) -> None:
+        nonlocal commands, y
+        if commands:
+            pages.append("\n".join(commands).encode("ascii"))
+        commands = []
+        y = 794
+        text("La pulga mercado | OPERACIONES COMERCIALES", size=11, bold=True)
+        text(f"Sucursal {sale['location_name']} · {sale['location_code']}", baseline=y - 18, size=9)
+        y -= 48
+        text("COMPROBANTE DE VENTA", size=8, bold=True)
+        y -= 26
+        text("Comprobante de venta", size=19, bold=True)
+        right_text(f"Nº {sale['receipt']}", 547, y, 12, True)
+        y -= 28
+        sold_at = datetime.fromisoformat(sale["sold_at"]).astimezone().strftime("%d/%m/%Y %H:%M")
+        text(f"Fecha: {sold_at}", size=10)
+        y -= 18
+        text(f"Estado: {sale['state']}", size=9)
+        y -= 14
+        details = (
+            ("Domicilio del local", sale.get("location_address", "")),
+            ("CUIT del local", sale.get("location_cuit", "")),
+            ("Vendedor/a", sale.get("seller_name", "")),
+            ("Domicilio del centro de distribución", sale.get("distribution_center_address", "")),
+        )
+        for label, value in details:
+            if value:
+                for part in wrap(f"{label}: {value}", 88):
+                    text(part, size=8)
+                    y -= 10
+        y -= 3
+        if include_table_heading:
+            table_heading()
+
     new_page()
     for line in lines:
         description = wrap(line["name"], 48)
@@ -111,14 +112,31 @@ def _receipt_pdf(sale: dict, lines: list[dict], payments: list[dict]) -> bytes:
         baseline = y - 11
         text(description[0], 55, baseline, 10, True)
         right_text(line["quantity"], 365, baseline, 10)
-        right_text(_pdf_money(line["unit_price_cents"]), 455, baseline, 10)
-        right_text(_pdf_money(line["quantity"] * line["unit_price_cents"]), 540, baseline, 10)
+        right_text(pdf_money(line["unit_price_cents"]), 455, baseline, 10)
+        right_text(pdf_money(line["quantity"] * line["unit_price_cents"]), 540, baseline, 10)
         offset = 13
         for part in description[1:]:
             text(part, 55, baseline - offset, 8)
             offset += 12
         y -= row_height
         draw_line(48, y, 547, y)
+        y -= 4
+
+    suppliers = sale.get("suppliers", [])
+    if suppliers:
+        if y - 28 < page_bottom:
+            new_page(include_table_heading=False)
+        y -= 8
+        text("Proveedores de los productos", 55, y, 9, True)
+        y -= 15
+        for supplier in suppliers:
+            description = f"{supplier['name']}: {supplier['address']}".strip(": ")
+            wrapped_supplier = wrap(description, 84)
+            for part in wrapped_supplier:
+                if y - 12 < page_bottom:
+                    new_page(include_table_heading=False)
+                text(part, 55, y, 8)
+                y -= 11
         y -= 4
 
     subtotal = sum(line["quantity"] * line["unit_price_cents"] for line in lines)
@@ -129,68 +147,28 @@ def _receipt_pdf(sale: dict, lines: list[dict], payments: list[dict]) -> bytes:
     y -= 5
     draw_line(48, y + 8, 547, y + 8)
     text("Subtotal", 55, y, 9)
-    right_text(_pdf_money(subtotal), 540, y, 9)
+    right_text(pdf_money(subtotal), 540, y, 9)
     y -= 16
     if adjustment:
         adjustment_label = "Descuento por medio de pago" if adjustment < 0 else "Recargo por medio de pago"
         text(adjustment_label, 55, y, 9)
-        right_text(_pdf_money(abs(adjustment)), 540, y, 9)
+        right_text(pdf_money(abs(adjustment)), 540, y, 9)
         y -= 16
     draw_line(48, y + 9, 547, y + 9)
-    right_text(f"TOTAL  {_pdf_money(sale['total_cents'])}", 540, y, 15, True)
+    right_text(f"TOTAL  {pdf_money(sale['total_cents'])}", 540, y, 15, True)
     y -= 28
     text("Pagado con", 55, y, 9, True)
     y -= 15
     for payment in payments:
         text(f"{payment['method'].capitalize()}", 55, y, 9)
-        right_text(_pdf_money(payment["amount_cents"]), 540, y, 9)
+        right_text(pdf_money(payment["amount_cents"]), 540, y, 9)
         y -= 14
     text("Gracias por su compra", 55, y - 4, 9)
 
     if commands:
         pages.append("\n".join(commands).encode("ascii"))
 
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
-    ]
-    page_ids = []
-    for page_content in pages:
-        page_id = len(objects) + 1
-        content_id = page_id + 1
-        page_ids.append(page_id)
-        objects.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
-            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_id} 0 R >>".encode("ascii")
-        )
-        objects.append(
-            b"<< /Length " + str(len(page_content)).encode("ascii") + b" >>\nstream\n"
-            + page_content + b"\nendstream"
-        )
-    objects[1] = (
-        f"<< /Type /Pages /Kids [{' '.join(f'{page_id} 0 R' for page_id in page_ids)}] "
-        f"/Count {len(page_ids)} >>"
-    ).encode("ascii")
-
-    pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    offsets = [0]
-    for object_id, content in enumerate(objects, start=1):
-        offsets.append(len(pdf))
-        pdf.extend(f"{object_id} 0 obj\n".encode("ascii"))
-        pdf.extend(content)
-        pdf.extend(b"\nendobj\n")
-    xref_offset = len(pdf)
-    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
-    pdf.extend(b"0000000000 65535 f \n")
-    for offset in offsets[1:]:
-        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
-    pdf.extend(
-        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
-        f"startxref\n{xref_offset}\n%%EOF\n".encode("ascii")
-    )
-    return bytes(pdf)
+    return build_pdf(pages)
 
 
 class RetailWebHandler(BaseHTTPRequestHandler):
@@ -230,6 +208,17 @@ class RetailWebHandler(BaseHTTPRequestHandler):
     def _one(self, sql: str, parameters: tuple = ()) -> dict:
         row = self.application.repository.one(sql, parameters)
         return dict(row) if row else {}
+
+    def _report_payload(self, start: str, end: str, location: str | None) -> dict:
+        return {
+            "sales": self.application.reports.sales_by_period(start, end, location),
+            "daily_sales": self.application.reports.net_sales_by_day(start, end, location),
+            "best_sellers": self.application.reports.best_sellers_and_margin(start, end, location),
+            "category_sales": self.application.reports.units_sold_by_category(start, end, location),
+            "inventory": self.application.reports.inventory_and_minimums(location),
+            "logistics": self.application.reports.logistics_performance(start, end, location),
+            "movements": self.application.reports.inventory_movements(start, end, location),
+        }
 
     def _session_token(self) -> str | None:
         cookie = SimpleCookie()
@@ -279,7 +268,7 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                 return True
             if path.startswith("/api/packages/"):
                 action = path.rsplit("/", 1)[-1]
-                if action in ("seal", "dispatch", "disposition"):
+                if action in ("seal", "dispatch", "disposition", "cancel"):
                     return True
                 return self._require_role(user, "LOCAL")
             self._deny(403, "El perfil Centro de Distribución no tiene permiso para esta operación.")
@@ -303,6 +292,20 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                 or any(code != local_code for code in destinations)
             ):
                 self._deny(403, "Solo podés solicitar reposición para tu sucursal.")
+                return False
+            return True
+        if path.startswith("/api/orders/") and path.endswith("/update"):
+            order_id = path.removeprefix("/api/orders/").removesuffix("/update").strip("/")
+            order = self._one(
+                """SELECT l.code AS destination_code FROM replenishment_orders o
+                   JOIN locations l ON l.id=o.destination_id WHERE o.id=?""",
+                (order_id,),
+            )
+            if not order:
+                self._deny(404, "Orden de reposición inexistente.")
+                return False
+            if order["destination_code"] != local_code:
+                self._deny(403, "Solo podés modificar órdenes de tu sucursal.")
                 return False
             return True
         if path in ("/api/sales", "/api/inventory-counts"):
@@ -361,7 +364,9 @@ class RetailWebHandler(BaseHTTPRequestHandler):
 
     def _bootstrap(self, user: dict | None = None) -> dict:
         repository = self.application.repository
-        locations = self._all("SELECT id,code,name,type FROM locations ORDER BY type DESC,code")
+        locations = self._all(
+            "SELECT id,code,name,type,address,cuit FROM locations ORDER BY type DESC,code"
+        )
         products = self._all(
             """SELECT p.id,p.sku,p.name,p.category,p.category_id,p.cost_cents,p.price_cents,p.minimum_stock,
                       p.supplier_id,s.name AS supplier_name
@@ -420,18 +425,30 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                 (package["id"],),
             )
         sales = self._all(
-            """SELECT s.id,s.receipt,s.sold_at,s.total_cents,s.state,
+            """SELECT s.id,s.receipt,s.sold_at,s.total_cents,s.state,s.seller_name,
                       l.code AS location_code,l.name AS location_name,
+                      l.address AS location_address,l.cuit AS location_cuit,
+                      cd.address AS distribution_center_address,
                       GROUP_CONCAT(p.method, ', ') AS payment_methods
                FROM sales s JOIN locations l ON l.id=s.location_id
+               LEFT JOIN locations cd ON cd.type='CD'
                LEFT JOIN payments p ON p.sale_id=s.id
                GROUP BY s.id ORDER BY s.id DESC LIMIT 30"""
         )
         for sale in sales:
             sale["lines"] = self._all(
-                """SELECT p.sku,p.name,sl.quantity,sl.returned_quantity,sl.unit_price_cents
+                """SELECT p.sku,p.name,sl.quantity,sl.returned_quantity,sl.unit_price_cents,
+                          s.id AS supplier_id,s.name AS supplier_name,s.address AS supplier_address
                    FROM sale_lines sl JOIN products p ON p.id=sl.product_id
+                   LEFT JOIN suppliers s ON s.id=p.supplier_id
                    WHERE sl.sale_id=?""",
+                (sale["id"],),
+            )
+            sale["suppliers"] = self._all(
+                """SELECT DISTINCT s.id,s.name,s.address FROM sale_lines sl
+                   JOIN products p ON p.id=sl.product_id
+                   JOIN suppliers s ON s.id=p.supplier_id
+                   WHERE sl.sale_id=? ORDER BY s.name""",
                 (sale["id"],),
             )
             sale["payments"] = self._all(
@@ -449,7 +466,9 @@ class RetailWebHandler(BaseHTTPRequestHandler):
         sales_report = self.application.reports.sales_by_period(today, today)
         result = {
             "locations": locations,
-            "suppliers": self._all("SELECT id,tax_id,name,phone,email FROM suppliers ORDER BY name"),
+            "suppliers": self._all(
+                "SELECT id,tax_id,name,phone,email,address FROM suppliers ORDER BY name"
+            ),
             "categories": self._all("SELECT id,name FROM categories ORDER BY name"),
             "products": products,
             "stock": stock,
@@ -548,9 +567,12 @@ class RetailWebHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/sales/") and parsed.path.endswith("/receipt.pdf"):
             receipt = unquote(parsed.path[len("/api/sales/") : -len("/receipt.pdf")])
             sale = self._one(
-                """SELECT s.id,s.receipt,s.sold_at,s.total_cents,s.state,
-                          l.code AS location_code,l.name AS location_name
-                   FROM sales s JOIN locations l ON l.id=s.location_id WHERE s.receipt=?""",
+                """SELECT s.id,s.receipt,s.sold_at,s.total_cents,s.state,s.seller_name,
+                          l.code AS location_code,l.name AS location_name,
+                          l.address AS location_address,l.cuit AS location_cuit,
+                          cd.address AS distribution_center_address
+                   FROM sales s JOIN locations l ON l.id=s.location_id
+                   LEFT JOIN locations cd ON cd.type='CD' WHERE s.receipt=?""",
                 (receipt,),
             )
             if not sale:
@@ -563,6 +585,13 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                 """SELECT p.sku,p.name,p.category,sl.quantity,sl.returned_quantity,sl.unit_price_cents
                    FROM sale_lines sl JOIN products p ON p.id=sl.product_id
                    WHERE sl.sale_id=? ORDER BY sl.id""",
+                (sale["id"],),
+            )
+            sale["suppliers"] = self._all(
+                """SELECT DISTINCT s.id,s.name,s.address FROM sale_lines sl
+                   JOIN products p ON p.id=sl.product_id
+                   JOIN suppliers s ON s.id=p.supplier_id
+                   WHERE sl.sale_id=? ORDER BY s.name""",
                 (sale["id"],),
             )
             payments = self._all(
@@ -580,25 +609,57 @@ class RetailWebHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/bootstrap":
             self._json(200, self._bootstrap(user))
             return
-        if parsed.path == "/api/reports":
+        if parsed.path in ("/api/reports", "/api/reports/summary.pdf"):
             query = parse_qs(parsed.query)
             start = query.get("start", [date.today().replace(day=1).isoformat()])[0]
             end = query.get("end", [date.today().isoformat()])[0]
             location = query.get("location", [""])[0] or None
+            if parsed.path.endswith(".pdf"):
+                try:
+                    start_date = date.fromisoformat(start)
+                    end_date = date.fromisoformat(end)
+                except ValueError:
+                    self._json(400, {"error": "Ingresá un período válido para generar el reporte."})
+                    return
+                if start_date > end_date:
+                    self._json(400, {"error": "La fecha inicial no puede ser posterior a la fecha final."})
+                    return
             if user["role"] == "LOCAL":
                 location = user["location_code"]
-            self._json(
-                200,
-                {
-                    "sales": self.application.reports.sales_by_period(start, end, location),
-                    "daily_sales": self.application.reports.net_sales_by_day(start, end, location),
-                    "best_sellers": self.application.reports.best_sellers_and_margin(start, end, location),
-                    "category_sales": self.application.reports.units_sold_by_category(start, end, location),
-                    "inventory": self.application.reports.inventory_and_minimums(location),
-                    "logistics": self.application.reports.logistics_performance(start, end, location),
-                    "movements": self.application.reports.inventory_movements(start, end, location),
-                },
-            )
+            elif location and not self._one(
+                "SELECT code FROM locations WHERE code=? AND type='LOCAL'", (location,)
+            ):
+                if parsed.path.endswith(".pdf"):
+                    self._json(400, {"error": "El local seleccionado no existe."})
+                    return
+            report = self._report_payload(start, end, location)
+            if parsed.path.endswith(".pdf"):
+                locations = self._all(
+                    """SELECT code,name,address,cuit FROM locations
+                       WHERE type='LOCAL' AND (? IS NULL OR code=?) ORDER BY name""",
+                    (location, location),
+                )
+                generated_at = datetime.now().astimezone().strftime("%d/%m/%Y %H:%M:%S %Z")
+                filename = f"resumen-reportes-{start}-{end}.pdf"
+                payload = report_summary_pdf(
+                    report,
+                    user["username"],
+                    user["role"],
+                    generated_at,
+                    start,
+                    end,
+                    locations,
+                    include_logistics=user["role"] in ("ADMIN", "CD"),
+                    include_categories=user["role"] == "LOCAL",
+                )
+                self._send(
+                    200,
+                    payload,
+                    "application/pdf",
+                    {"Content-Disposition": f'attachment; filename="{filename}"'},
+                )
+                return
+            self._json(200, report)
             return
         asset = "index.html" if parsed.path in ("/", "/index.html") else parsed.path.removeprefix("/assets/")
         asset_path = (WEB_ROOT / asset).resolve()
@@ -708,6 +769,10 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                     user_id, body["password"], user["id"], self._session_token()
                 )
                 result = "Contraseña actualizada."
+            elif path.startswith("/api/users/") and path.endswith("/activate"):
+                user_id = int(path.removeprefix("/api/users/").removesuffix("/activate").strip("/"))
+                self.application.auth.activate_user(user_id)
+                result = "Cuenta reactivada."
             elif path.startswith("/api/users/") and path.endswith("/delete"):
                 user_id = int(path.removeprefix("/api/users/").removesuffix("/delete").strip("/"))
                 self.application.auth.delete_user(user_id, user["id"])
@@ -810,6 +875,13 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                     return
             elif path == "/api/orders":
                 result = service.create_replenishment(body["destination_code"], {key: int(value) for key, value in body["items"].items()})
+            elif path.startswith("/api/orders/") and path.endswith("/update"):
+                order_id = int(path.removeprefix("/api/orders/").removesuffix("/update").strip("/"))
+                service.update_replenishment_order(
+                    order_id,
+                    {key: int(value) for key, value in body["items"].items()},
+                )
+                result = "Orden de reposición actualizada."
             elif path == "/api/replenishment-batches":
                 result = service.create_consolidated_replenishment(body["destinations"])
             elif path == "/api/packages":
@@ -827,6 +899,9 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                 if action == "seal":
                     service.seal_package(package_code, body["seal"])
                     result = "Bulto precintado."
+                elif action == "cancel":
+                    service.cancel_package(package_code)
+                    result = "Bulto cancelado; se recalcularon las cantidades pendientes de las órdenes."
                 elif action == "dispatch":
                     service.dispatch(package_code)
                     result = "Despacho registrado."
@@ -854,6 +929,7 @@ class RetailWebHandler(BaseHTTPRequestHandler):
                     body["location_code"],
                     {line["sku"]: int(line["quantity"]) for line in body["items"]},
                     payments,
+                    seller_name=user["username"],
                 )
             elif path == "/api/returns":
                 result = service.return_items(body["receipt"], {line["sku"]: int(line["quantity"]) for line in body["items"]}, bool(body["restock"]))
